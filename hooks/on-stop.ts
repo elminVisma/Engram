@@ -6,6 +6,9 @@
  * Never outputs to stdout. Never blocks Claude. Fails silently.
  */
 
+const [nodeMajor] = process.versions.node.split('.').map(Number);
+if (nodeMajor < 24) process.exit(0);
+
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import { homedir } from 'os';

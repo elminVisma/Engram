@@ -9,6 +9,9 @@
  * stays warm (fast); if not, falls back to direct execution.
  */
 
+const [nodeMajor] = process.versions.node.split('.').map(Number);
+if (nodeMajor < 24) process.exit(0);
+
 import { INJECTION_THRESHOLD } from '../lib/memory.ts';
 import { daemonSearch } from '../daemon/client.ts';
 

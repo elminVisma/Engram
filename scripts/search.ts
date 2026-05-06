@@ -8,11 +8,7 @@
  */
 
 import { existsSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-import { search } from '../lib/memory.ts';
-
-const DB_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'memory', 'memory.db');
+import { search, DB_PATH } from '../lib/memory.ts';
 
 function parseArgs(): { query: string; top: number } {
   const args = process.argv.slice(2);

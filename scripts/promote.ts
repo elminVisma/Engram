@@ -57,7 +57,7 @@ async function main() {
       AND memory_tier = 'short'
       AND access_count >= ?
     ORDER BY access_count DESC
-  `).all(threshold) as MemoryRow[];
+  `).all(threshold) as unknown as MemoryRow[];
 
   if (candidates.length === 0) {
     console.log(`${GREY}No short-term memories have reached the promotion threshold (${threshold} accesses).${RESET}\n`);

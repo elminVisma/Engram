@@ -4,7 +4,7 @@
  * Do NOT import from scripts/ here — that would be circular.
  */
 
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 
 export const CURRENT_VERSION = 4;
 
@@ -56,6 +56,9 @@ export function ensureSchema(db: DatabaseSync): void {
         db.prepare('UPDATE schema_version SET version = ?').run(to);
         version = to;
         process.stderr.write(`[Engram] migrated schema v${from} → v${to}\n`);
+        if (from === 3) {
+          process.stderr.write('[Engram] Schema v4: embeddings moved to memories table. Run npm run reindex to rebuild.\n');
+        }
       } catch (e: unknown) {
         // Column already exists errors are OK (idempotent)
         const msg = e instanceof Error ? e.message : String(e);
@@ -65,4 +68,7 @@ export function ensureSchema(db: DatabaseSync): void {
       }
     }
   }
+
+  // Clean up the old sqlite-vec virtual table if it exists
+  try { db.exec('DROP TABLE IF EXISTS memory_embeddings'); } catch { /* ignore */ }
 }

@@ -74,7 +74,7 @@ async function main() {
     WHERE is_active = 1
       AND memory_tier = 'short'
     ORDER BY confidence ASC
-  `).all() as MemoryRow[];
+  `).all() as unknown as MemoryRow[];
 
   if (memories.length === 0) {
     console.log(`${GREY}No active short-term memories to decay.${RESET}\n`);

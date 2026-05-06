@@ -28,8 +28,9 @@ You type a prompt
 Fully automatic in both directions. You just work.
 
 - **Markdown** is the source of truth — human-readable, git-tracked, portable forever
-- **sqlite-vec** is the search layer — a single `.db` file, no server process
+- **node:sqlite** is the storage layer — built into Node 24 LTS, a single `.db` file, no server process, no native compilation
 - **all-MiniLM-L6-v2** generates embeddings locally via ONNX — works fully offline after first download
+- **Pure JS cosine similarity** replaces sqlite-vec KNN — fast enough at Engram scale, zero native deps
 
 ---
 
@@ -425,23 +426,25 @@ Over time, Claude arrives at each session pre-loaded with everything it has lear
 ```json
 {
   "@huggingface/transformers": "^3.0.0",
-  "better-sqlite3": "^9.4.3",
-  "sqlite-vec": "^0.1.6",
   "tsx": "^4.7.0"
 }
 ```
 
-Pure TypeScript. No Python. The `@anthropic-ai/sdk` is only used by `on-stop.ts` for the Haiku judgment call — your existing `ANTHROPIC_API_KEY` from Claude Code covers it.
+Pure TypeScript. No Python. No native modules. SQLite is built into Node 24 via `node:sqlite` — no `better-sqlite3` or `sqlite-vec` prebuilds needed. The `@anthropic-ai/sdk` is only used by `on-stop.ts` for the Haiku judgment call — your existing `ANTHROPIC_API_KEY` from Claude Code covers it.
 
 ---
 
 ## New Machine Setup
+
+Requires **Node 24+** (latest LTS — `node:sqlite` is stable, no flags needed).
 
 ```bash
 git clone https://github.com/gfunkmaster/Engram ~/.engram
 cd ~/.engram && npm install
 npm run reindex
 ```
+
+No native compilation required — `node:sqlite` is built into Node 24. No prebuilt binaries to download.
 
 The markdown files travel with you via git. The vector index is regenerated on each machine in seconds.
 

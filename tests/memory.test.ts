@@ -145,6 +145,27 @@ describe('autoRemember JSON parsing logic', () => {
   });
 });
 
+// ─── cosineDistance tests ────────────────────────────────────────────────────
+
+describe('cosineDistance', () => {
+  it('returns 0 for identical vectors', () => {
+    const v = serialize([1, 0, 0, 1]);
+    expect(cosineDistance(v, v)).toBeCloseTo(0);
+  });
+
+  it('returns 1 for orthogonal vectors', () => {
+    const a = serialize([1, 0]);
+    const b = serialize([0, 1]);
+    expect(cosineDistance(a, b)).toBeCloseTo(1);
+  });
+
+  it('returns < 0.5 for similar vectors', () => {
+    const a = serialize([1, 1, 0]);
+    const b = serialize([1, 0.9, 0.1]);
+    expect(cosineDistance(a, b)).toBeLessThan(0.5);
+  });
+});
+
 // ─── Task 22: decideSave tests ────────────────────────────────────────────────
 
 describe('decideSave', () => {
