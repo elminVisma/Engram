@@ -3,15 +3,30 @@
  * Shared by scripts, hooks, and the client wrapper.
  */
 
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
+import { DatabaseSync } from 'node:sqlite';
 import { pipeline } from '@huggingface/transformers';
 import Anthropic from '@anthropic-ai/sdk';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join, dirname, basename } from 'path';
+import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
 import { ensureSchema } from './migrate.ts';
+import {
+  DUPLICATE_THRESHOLD, SUPERSESSION_THRESHOLD, INJECTION_THRESHOLD,
+  PROMOTE_ACCESS_THRESHOLD, SIGNAL_PHRASES,
+  serialize, cosineDistance, today, hasSignal,
+  sanitizeTopic, getTopicFromGit, getProjectScope,
+  chunkText, stripJsonFences, decideSave,
+  type MemoryTier, type SaveDecision,
+} from './utils.ts';
+
+export {
+  DUPLICATE_THRESHOLD, SUPERSESSION_THRESHOLD, INJECTION_THRESHOLD,
+  PROMOTE_ACCESS_THRESHOLD, SIGNAL_PHRASES,
+  serialize, cosineDistance, today, hasSignal,
+  sanitizeTopic, getTopicFromGit, getProjectScope,
+  chunkText, stripJsonFences, decideSave,
+  type MemoryTier, type SaveDecision,
+};
 
 const ENGRAM_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const RAW_DIR = join(ENGRAM_DIR, 'memory', 'raw');
@@ -21,37 +36,7 @@ const EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2';
 // Task 10: allow override via env var
 const HAIKU = process.env.ENGRAM_MODEL ?? 'claude-haiku-4-5-20251001';
 
-// Distance thresholds (cosine distance — lower = more similar)
-export const DUPLICATE_THRESHOLD = 0.15;
-export const SUPERSESSION_THRESHOLD = 0.35;
-export const INJECTION_THRESHOLD = 0.75;
-
 const MIN_RESPONSE_LENGTH = 200;
-export const PROMOTE_ACCESS_THRESHOLD = parseInt(process.env.ENGRAM_PROMOTE_THRESHOLD ?? '10', 10);
-
-export const SIGNAL_PHRASES = [
-  // Discovery
-  'turns out', 'it turns out', 'discovered that', 'found that', 'realized that',
-  'interestingly', 'surprisingly', 'unexpectedly', 'what i found',
-  // Problems & root causes
-  'the issue was', 'the problem was', 'root cause', 'the bug was', 'the culprit',
-  'what broke', 'why it failed', 'the reason it', 'the cause',
-  // Solutions
-  'fixed by', 'resolved by', 'solved by', 'the fix is', 'the solution is',
-  'the workaround', 'what worked',
-  // Patterns & insights
-  'the trick is', 'the trick here', 'the key insight', 'important to note',
-  'worth noting', 'the pattern here', 'the pattern is',
-  // Constraints & warnings
-  'always ensure', 'never do', 'avoid', 'make sure to', 'be careful',
-  'watch out', 'non-obvious', 'counterintuitive', 'caveat', 'edge case',
-  'the catch is', 'gotcha', 'pitfall',
-  // Learnings
-  'learned that', 'this means', 'the implication', 'takeaway', 'lesson',
-  'what this means', 'worth remembering',
-];
-
-export type MemoryTier = 'short' | 'long';
 
 export interface SearchResult {
   id: number;
@@ -76,113 +61,14 @@ export interface SaveOptions {
   projectScope?: string | null;
 }
 
-export function serialize(vector: number[]): Buffer {
-  const buf = Buffer.allocUnsafe(vector.length * 4);
-  new Float32Array(buf.buffer).set(vector);
-  return buf;
-}
-
-export function today(): string {
-  return new Date().toISOString().split('T')[0];
-}
-
-export function hasSignal(text: string): boolean {
-  const lower = text.toLowerCase();
-  return SIGNAL_PHRASES.some(p => lower.includes(p));
-}
-
-// Task 6: sanitize topic to prevent path traversal
-export function sanitizeTopic(topic: string): string {
-  const sanitized = topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  if (!sanitized || sanitized.includes('..')) return 'general';
-  return sanitized;
-}
-
-export function getTopicFromGit(): string {
-  try {
-    const branch = execSync('git branch --show-current', {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-
-    if (!branch || branch === 'main' || branch === 'master') {
-      // On main/master, use the repo name as the topic
-      const repoPath = execSync('git rev-parse --show-toplevel', {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-      return sanitizeTopic(basename(repoPath));
-    }
-
-    // Use the full branch name sanitized — ESHM-1234-fix-jwt → eshm-1234-fix-jwt
-    return sanitizeTopic(branch);
-  } catch {
-    return 'general';
-  }
-}
-
-/** Returns the git remote origin URL for the current working directory, or null. */
-export function getProjectScope(): string | null {
-  try {
-    const remote = execSync('git remote get-url origin', {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    return remote || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Sliding window chunker with heading-aware splitting.
- */
-export function chunkText(text: string, size = 400, overlap = 80): string[] {
-  const sections = text.split(/(?=^#{1,3}\s)/m).filter(s => s.trim().length > 20);
-  const chunks: string[] = [];
-
-  for (const section of sections) {
-    const words = section.split(/\s+/).filter(Boolean);
-    if (words.length <= size) {
-      chunks.push(section.trim());
-      continue;
-    }
-    let i = 0;
-    while (i < words.length) {
-      const chunk = words.slice(i, i + size).join(' ');
-      if (chunk.trim()) chunks.push(chunk);
-      i += size - overlap;
-      // Task 1: fix dropping the last segment — was `if (i + overlap >= words.length) break;`
-      if (i >= words.length) break;
-    }
-  }
-
-  return chunks.filter(c => c.trim().length > 20);
-}
-
-// Task 3: helper to strip markdown code fences before JSON.parse
-export function stripJsonFences(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  return fenced ? fenced[1].trim() : text.trim();
-}
-
-// Task 22: decision logic extracted for testability
-export type SaveDecision = 'skip' | 'new' | { supersede: number };
-export function decideSave(candidates: Array<{ id: number; distance: number }>): SaveDecision {
-  if (candidates.length === 0) return 'new';
-  const nearest = candidates[0];
-  if (nearest.distance < DUPLICATE_THRESHOLD) return 'skip';
-  if (nearest.distance < SUPERSESSION_THRESHOLD) return { supersede: nearest.id };
-  return 'new';
-}
-
-/** Open the DB, load sqlite-vec, and run schema migrations. */
-function openDb(path: string = DB_PATH, options?: Database.Options): Database.Database {
-  const db = new Database(path, options);
-  sqliteVec.load(db);
+/** Open the DB and run schema migrations. */
+function openDb(path: string = DB_PATH): DatabaseSync {
+  const db = new DatabaseSync(path);
   ensureSchema(db);
   return db;
 }
+
+type EmbeddingRow = Omit<SearchResult, 'distance'> & { embedding: Uint8Array };
 
 /**
  * Tier-aware semantic search.
@@ -202,67 +88,62 @@ export async function search(
 
   const extractor = await pipeline('feature-extraction', EMBED_MODEL, { dtype: 'fp32' });
   const out = await extractor(query, { pooling: 'mean', normalize: true });
-  const embedding = serialize(Array.from(out.data as Float32Array));
+  const queryEmbedding = serialize(Array.from(out.data as Float32Array));
 
-  // Two separate queries guarantee best results from each tier regardless of mix.
-  // sqlite-vec applies KNN before WHERE filters, so a single combined query can miss
-  // relevant short-term results when long-term memories dominate the top-K candidates.
-  const kPerTier = Math.max(topK * 2, 20);
-  const db = openDb(DB_PATH, { readonly: true });
+  const db = openDb(DB_PATH);
 
   const SELECT = `
-    SELECT m.id, m.path, m.title, m.topic, m.chunk, m.is_active, m.superseded_by,
-           m.memory_tier, m.project_scope, m.confidence, m.access_count, e.distance
-    FROM memory_embeddings e
-    JOIN memories m ON m.id = e.id
+    SELECT id, path, title, topic, chunk, is_active, superseded_by,
+           memory_tier, project_scope, confidence, access_count, embedding
+    FROM memories
+    WHERE is_active = 1 AND embedding IS NOT NULL
   `;
 
-  // Query 1: long-term (global, no scope filter)
-  const longTerm = db.prepare(`
-    ${SELECT}
-    WHERE e.embedding MATCH ? AND k = ?
-      AND m.is_active = 1 AND m.memory_tier = 'long'
-    ORDER BY e.distance
-  `).all(embedding, kPerTier) as SearchResult[];
+  const longTerm = db.prepare(`${SELECT} AND memory_tier = 'long'`)
+    .all() as EmbeddingRow[];
 
-  // Query 2: short-term scoped to current project (or unscoped)
   const shortTerm = scope !== null
-    ? db.prepare(`
-        ${SELECT}
-        WHERE e.embedding MATCH ? AND k = ?
-          AND m.is_active = 1 AND m.memory_tier = 'short'
-          AND (m.project_scope = ? OR m.project_scope IS NULL)
-        ORDER BY e.distance
-      `).all(embedding, kPerTier, scope) as SearchResult[]
-    : db.prepare(`
-        ${SELECT}
-        WHERE e.embedding MATCH ? AND k = ?
-          AND m.is_active = 1 AND m.memory_tier = 'short'
-        ORDER BY e.distance
-      `).all(embedding, kPerTier) as SearchResult[];
+    ? (db.prepare(`${SELECT} AND memory_tier = 'short' AND (project_scope = ? OR project_scope IS NULL)`)
+        .all(scope) as EmbeddingRow[])
+    : (db.prepare(`${SELECT} AND memory_tier = 'short'`)
+        .all() as EmbeddingRow[]);
 
-  db.close();
-
-  // Merge, deduplicate by id, sort by distance
+  // Deduplicate by id, compute distances, sort
   const seen = new Set<number>();
-  const rows: SearchResult[] = [];
-  for (const r of [...longTerm, ...shortTerm].sort((a, b) => a.distance - b.distance)) {
-    if (!seen.has(r.id)) { seen.add(r.id); rows.push(r); }
+  const scored: Array<EmbeddingRow & { distance: number }> = [];
+  for (const r of [...longTerm, ...shortTerm]) {
+    if (!seen.has(r.id)) {
+      seen.add(r.id);
+      scored.push({ ...r, distance: cosineDistance(queryEmbedding, r.embedding) });
+    }
   }
-  const result = rows.slice(0, topK);
+  scored.sort((a, b) => a.distance - b.distance);
 
-  // Write phase — separate write DB only when there are results to track
-  if (result.length > 0) {
-    const writeDb = openDb(DB_PATH);
+  const results: SearchResult[] = scored.slice(0, topK).map(r => ({
+    id: r.id, path: r.path, title: r.title, topic: r.topic, chunk: r.chunk,
+    distance: r.distance, is_active: r.is_active, superseded_by: r.superseded_by,
+    memory_tier: r.memory_tier, project_scope: r.project_scope,
+    confidence: r.confidence, access_count: r.access_count,
+  }));
+
+  // Update access counts
+  if (results.length > 0) {
     const now = Math.floor(Date.now() / 1000);
-    const update = writeDb.prepare(
+    const update = db.prepare(
       'UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?'
     );
-    writeDb.transaction(() => { for (const r of result) update.run(now, r.id); })();
-    writeDb.close();
+    db.exec('BEGIN');
+    try {
+      for (const r of results) update.run(now, r.id);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
   }
 
-  return result;
+  db.close();
+  return results;
 }
 
 /** Search including superseded memories — used by the why CLI. */
@@ -271,21 +152,29 @@ export async function searchAll(query: string, topK = 20): Promise<SearchResult[
 
   const extractor = await pipeline('feature-extraction', EMBED_MODEL, { dtype: 'fp32' });
   const out = await extractor(query, { pooling: 'mean', normalize: true });
-  const embedding = serialize(Array.from(out.data as Float32Array));
+  const queryEmbedding = serialize(Array.from(out.data as Float32Array));
 
-  const db = openDb(DB_PATH, { readonly: true });
+  const db = openDb(DB_PATH);
 
   const rows = db.prepare(`
-    SELECT m.id, m.path, m.title, m.topic, m.chunk, m.is_active, m.superseded_by,
-           m.memory_tier, m.project_scope, m.confidence, m.access_count, e.distance
-    FROM memory_embeddings e
-    JOIN memories m ON m.id = e.id
-    WHERE e.embedding MATCH ? AND k = ?
-    ORDER BY e.distance
-  `).all(embedding, topK) as SearchResult[];
+    SELECT id, path, title, topic, chunk, is_active, superseded_by,
+           memory_tier, project_scope, confidence, access_count, embedding
+    FROM memories
+    WHERE embedding IS NOT NULL
+  `).all() as EmbeddingRow[];
 
   db.close();
-  return rows;
+
+  return rows
+    .map(r => ({
+      id: r.id, path: r.path, title: r.title, topic: r.topic, chunk: r.chunk,
+      distance: cosineDistance(queryEmbedding, r.embedding),
+      is_active: r.is_active, superseded_by: r.superseded_by,
+      memory_tier: r.memory_tier, project_scope: r.project_scope,
+      confidence: r.confidence, access_count: r.access_count,
+    }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, topK);
 }
 
 /** Write a memory to disk, handle supersession, and index. */
@@ -317,50 +206,51 @@ export async function saveMemory(
 
   // Task 14: single DB connection with WAL mode
   const db = openDb(DB_PATH);
-  db.pragma('journal_mode = WAL');
+  db.exec('PRAGMA journal_mode = WAL');
 
   try {
-    let supersededId: number | null = null;
-    let shouldSkip = false;
+    // Load all active embeddings and find nearest neighbours
+    const candidates = db.prepare(
+      'SELECT id, embedding FROM memories WHERE is_active = 1 AND embedding IS NOT NULL'
+    ).all() as Array<{ id: number; embedding: Uint8Array }>;
 
-    // Read + decide inside a transaction
-    db.transaction(() => {
-      const candidates = db.prepare(`
-        SELECT m.id, e.distance FROM memory_embeddings e
-        JOIN memories m ON m.id = e.id
-        WHERE e.embedding MATCH ? AND k = 5 AND m.is_active = 1
-        ORDER BY e.distance
-      `).all(embedding) as Array<{ id: number; distance: number }>;
+    const scored = candidates
+      .map(c => ({ id: c.id, distance: cosineDistance(embedding, c.embedding) }))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 5);
 
-      const decision = decideSave(candidates);
-      if (decision === 'skip') { shouldSkip = true; return; }
-      if (decision !== 'new') { supersededId = (decision as { supersede: number }).supersede; }
-    })();
-
-    if (shouldSkip) return;
+    const decision = decideSave(scored);
+    if (decision === 'skip') return;
+    const supersededId = decision === 'new' ? null : (decision as { supersede: number }).supersede;
 
     // File I/O outside transaction (unavoidable)
     const filepath = _writeMarkdown(title, topic, content, mergedOpts);
 
     // Write + supersede inside a transaction
-    db.transaction(() => {
-      const { lastInsertRowid } = db.prepare(`
+    db.exec('BEGIN');
+    try {
+      const result = db.prepare(`
         INSERT INTO memories
           (path, title, tags, topic, chunk, session_id, source_excerpt,
-           memory_tier, project_scope, confidence, decay_rate, supersedes, is_active, file_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0.02, ?, 1, NULL)
+           memory_tier, project_scope, confidence, decay_rate, supersedes, is_active, file_hash, embedding)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0.02, ?, 1, NULL, ?)
       `).run(
         filepath, title, mergedOpts.tags ?? 'auto', topic, content,
         mergedOpts.sessionId ?? null, mergedOpts.sourceExcerpt ?? null,
-        mergedOpts.tier, mergedOpts.projectScope, supersededId
+        mergedOpts.tier, mergedOpts.projectScope, supersededId, embedding
       );
 
-      db.prepare('INSERT INTO memory_embeddings (id, embedding) VALUES (?, ?)').run(lastInsertRowid, embedding);
+      const newId = Number(result.lastInsertRowid);
 
       if (supersededId !== null) {
-        db.prepare('UPDATE memories SET is_active = 0, superseded_by = ? WHERE id = ?').run(lastInsertRowid, supersededId);
+        db.prepare('UPDATE memories SET is_active = 0, superseded_by = ? WHERE id = ?').run(newId, supersededId);
       }
-    })();
+
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
   } finally {
     db.close();
   }

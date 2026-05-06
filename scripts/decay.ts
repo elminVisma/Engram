@@ -13,8 +13,7 @@
  *   npm run decay -- --apply --rate 0.005  # override per-memory decay_rate globally
  */
 
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
+import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { DB_PATH, RAW_DIR } from '../lib/memory.ts';
@@ -67,8 +66,7 @@ async function main() {
     console.log(`\n${YELLOW}Dry-run mode — pass --apply to commit changes${RESET}\n`);
   }
 
-  const db = new Database(DB_PATH);
-  sqliteVec.load(db);
+  const db = new DatabaseSync(DB_PATH);
 
   const memories = db.prepare(`
     SELECT id, title, topic, path, project_scope, confidence, decay_rate, access_count, created_at

@@ -6,8 +6,7 @@
  *   npm run status
  */
 
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
+import { DatabaseSync } from 'node:sqlite';
 import { statSync, existsSync } from 'fs';
 import http from 'node:http';
 import { DB_PATH } from '../lib/memory.ts';
@@ -74,8 +73,7 @@ async function main() {
     console.log(`  Size:        ${formatBytes(dbStat.size)}`);
 
     try {
-      const db = new Database(DB_PATH, { readonly: true });
-      sqliteVec.load(db);
+      const db = new DatabaseSync(DB_PATH, { readOnly: true });
 
       const shortCount = (db.prepare(`SELECT COUNT(*) as n FROM memories WHERE is_active = 1 AND memory_tier = 'short'`).get() as { n: number }).n;
       const longCount  = (db.prepare(`SELECT COUNT(*) as n FROM memories WHERE is_active = 1 AND memory_tier = 'long'`).get() as { n: number }).n;

@@ -10,8 +10,7 @@
  *   npm run purge -- --query "JWT auth" --apply --top 3  # purge top 3 matches
  */
 
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, renameSync, existsSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
@@ -39,7 +38,7 @@ interface MemoryRow {
   memory_tier: string;
 }
 
-function purgeById(db: Database.Database, id: number, apply: boolean): void {
+function purgeById(db: DatabaseSync, id: number, apply: boolean): void {
   const row = db.prepare(`
     SELECT id, path, title, topic, chunk, confidence, access_count, memory_tier
     FROM memories WHERE id = ?
@@ -67,7 +66,7 @@ function purgeById(db: Database.Database, id: number, apply: boolean): void {
   console.log(`\n${RED}✕ Purged memory #${row.id}${RESET}\n`);
 }
 
-function _applyPurge(db: Database.Database, row: MemoryRow): void {
+function _applyPurge(db: DatabaseSync, row: MemoryRow): void {
   db.prepare('UPDATE memories SET is_active = 0 WHERE id = ?').run(row.id);
 
   // Move markdown file to _purged/
@@ -108,8 +107,7 @@ async function main() {
     process.exit(1);
   }
 
-  const db = new Database(DB_PATH);
-  sqliteVec.load(db);
+  const db = new DatabaseSync(DB_PATH);
 
   if (idIdx !== -1) {
     const id = parseInt(args[idIdx + 1], 10);

@@ -7,8 +7,7 @@
  *   npm run migrate
  */
 
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
+import { DatabaseSync } from 'node:sqlite';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
@@ -23,8 +22,7 @@ async function main() {
     return;
   }
 
-  const db = new Database(DB_PATH);
-  sqliteVec.load(db);
+  const db = new DatabaseSync(DB_PATH);
   ensureSchema(db);
   db.close();
   console.log(`Schema is up to date (v${CURRENT_VERSION}).`);

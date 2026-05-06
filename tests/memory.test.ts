@@ -4,11 +4,13 @@ import {
   hasSignal,
   stripJsonFences,
   decideSave,
+  cosineDistance,
+  serialize,
   SIGNAL_PHRASES,
   DUPLICATE_THRESHOLD,
   SUPERSESSION_THRESHOLD,
   INJECTION_THRESHOLD,
-} from '../lib/memory.ts';
+} from '../lib/utils.ts';
 
 // ─── Task 19: chunkText tests ─────────────────────────────────────────────────
 
@@ -177,5 +179,40 @@ describe('decideSave', () => {
     expect(DUPLICATE_THRESHOLD).toBe(0.15);
     expect(SUPERSESSION_THRESHOLD).toBe(0.35);
     expect(INJECTION_THRESHOLD).toBe(0.75);
+  });
+});
+
+// ─── cosineDistance tests ─────────────────────────────────────────────────────
+
+describe('cosineDistance', () => {
+  it('returns ~0 for identical vectors', () => {
+    const v = serialize([1, 0, 0, 0]);
+    expect(cosineDistance(v, v)).toBeCloseTo(0);
+  });
+
+  it('returns ~1 for orthogonal vectors', () => {
+    const a = serialize([1, 0]);
+    const b = serialize([0, 1]);
+    expect(cosineDistance(a, b)).toBeCloseTo(1);
+  });
+
+  it('returns ~0 for parallel vectors of different magnitude', () => {
+    const a = serialize([2, 0]);
+    const b = serialize([4, 0]);
+    expect(cosineDistance(a, b)).toBeCloseTo(0);
+  });
+
+  it('returns 1 for a zero vector', () => {
+    const zero = serialize([0, 0]);
+    const v = serialize([1, 0]);
+    expect(cosineDistance(zero, v)).toBe(1);
+  });
+
+  it('returns a value between 0 and 2 for arbitrary vectors', () => {
+    const a = serialize([1, 2, 3, 4]);
+    const b = serialize([4, 3, 2, 1]);
+    const d = cosineDistance(a, b);
+    expect(d).toBeGreaterThanOrEqual(0);
+    expect(d).toBeLessThanOrEqual(2);
   });
 });

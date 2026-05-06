@@ -19,13 +19,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.51.0",
-    "@huggingface/transformers": "^3.0.0",
-    "better-sqlite3": "^9.4.3",
-    "sqlite-vec": "^0.1.6"
+    "@huggingface/transformers": "^3.0.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.8",
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.0.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
     "vitest": "^1.0.0"

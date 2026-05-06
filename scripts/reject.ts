@@ -12,8 +12,7 @@
  *   npm run reject -- --id 42 --apply --reason "Wrong — JWT rotation is optional here"
  */
 
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, renameSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
 import { DB_PATH, RAW_DIR } from '../lib/memory.ts';
@@ -69,8 +68,7 @@ async function main() {
     console.log(`\n${YELLOW}Dry-run mode — pass --apply to commit changes${RESET}\n`);
   }
 
-  const db = new Database(DB_PATH);
-  sqliteVec.load(db);
+  const db = new DatabaseSync(DB_PATH);
 
   const row = db.prepare(`
     SELECT id, path, title, topic, chunk, memory_tier, confidence, access_count
