@@ -5,7 +5,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { pipeline } from '@huggingface/transformers';
-import Anthropic from '@anthropic-ai/sdk';
+import { spawnSync } from 'child_process';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -15,8 +15,8 @@ import {
   PROMOTE_ACCESS_THRESHOLD, SIGNAL_PHRASES,
   serialize, cosineDistance, today, hasSignal,
   sanitizeTopic, getTopicFromGit, getProjectScope,
-  chunkText, stripJsonFences, decideSave,
-  type MemoryTier, type SaveDecision,
+  chunkText, stripJsonFences, decideSave, heuristicExtract,
+  type MemoryTier, type SaveDecision, type HeuristicExtract,
 } from './utils.ts';
 
 export {
@@ -24,8 +24,8 @@ export {
   PROMOTE_ACCESS_THRESHOLD, SIGNAL_PHRASES,
   serialize, cosineDistance, today, hasSignal,
   sanitizeTopic, getTopicFromGit, getProjectScope,
-  chunkText, stripJsonFences, decideSave,
-  type MemoryTier, type SaveDecision,
+  chunkText, stripJsonFences, decideSave, heuristicExtract,
+  type MemoryTier, type SaveDecision, type HeuristicExtract,
 };
 
 const ENGRAM_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,7 +34,7 @@ export const DB_PATH = join(ENGRAM_DIR, 'memory', 'memory.db');
 
 const EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2';
 // Task 10: allow override via env var
-const HAIKU = process.env.ENGRAM_MODEL ?? 'claude-haiku-4-5-20251001';
+const CLASSIFY_MODEL = process.env.ENGRAM_MODEL ?? 'claude-haiku-4-5-20251001';
 
 const MIN_RESPONSE_LENGTH = 200;
 
@@ -303,22 +303,11 @@ export async function autoRemember(
   if (!responseText || responseText.length < MIN_RESPONSE_LENGTH) return;
   if (!hasSignal(responseText)) return;
 
-  // Task 9: fail visibly if API key is missing
-  if (!process.env.ANTHROPIC_API_KEY) {
-    process.stderr.write('[Engram] ANTHROPIC_API_KEY not set — auto-remember disabled\n');
-    return;
-  }
-
-  // Task 26: allow disabling all Haiku API calls
   if (process.env.ENGRAM_DISABLE_HAIKU === '1') return;
 
-  const client = new Anthropic();
-  const result = await client.messages.create({
-    model: HAIKU,
-    max_tokens: 200,
-    messages: [{
-      role: 'user',
-      content: `Does this response contain a non-obvious technical learning worth saving to long-term memory?
+  const scope = projectScope !== undefined ? projectScope : getProjectScope();
+
+  const prompt = `Does this response contain a non-obvious technical learning worth saving to long-term memory?
 
 SAVE: non-obvious discoveries, bug root causes, patterns, constraints, gotchas, non-obvious decisions.
 SKIP: routine code generation, obvious explanations, status updates, conversational filler.
@@ -329,19 +318,44 @@ ${responseText.slice(0, 2000)}
 JSON only — no other text:
 {"worth_saving": true, "title": "under 8 words", "content": "1-3 sentences", "excerpt": "verbatim sentence that triggered this"}
 or
-{"worth_saving": false}`,
-    }],
-  });
+{"worth_saving": false}`;
 
-  const text = result.content[0].type === 'text' ? result.content[0].text.trim() : '';
+  let text = '';
+  try {
+    // --setting-sources "" prevents loading ~/.claude/settings.json (avoids hook recursion)
+    // spawnSync instead of execSync so exit code 1 ("Reached max turns") doesn't throw
+    const result = spawnSync(
+      'claude',
+      ['-p', '-', '--model', CLASSIFY_MODEL, '--no-session-persistence',
+       '--max-turns', '1', '--output-format', 'json', '--setting-sources', ''],
+      { input: prompt, encoding: 'utf-8', timeout: 30_000 }
+    );
+    const raw = (result.stdout ?? '').trim();
+    if (!raw) throw new Error(result.stderr ?? 'no output');
+    // CLI wraps output in {"type":"result","result":"..."}
+    if (raw.startsWith('{')) {
+      try {
+        const wrapper = JSON.parse(raw);
+        text = (wrapper.result ?? wrapper.text ?? raw).trim();
+      } catch { text = raw; }
+    } else {
+      text = raw;
+    }
+  } catch {
+    // CLI unavailable or timed out — fall back to heuristic
+    const extracted = heuristicExtract(responseText);
+    if (!extracted) return;
+    await saveMemory(extracted.title, topic ?? getTopicFromGit(), extracted.content, {
+      sessionId, sourceExcerpt: extracted.excerpt, tier: 'short', projectScope: scope,
+    });
+    return;
+  }
+
   if (!text) return;
 
   let parsed: { worth_saving: boolean; title?: string; content?: string; excerpt?: string };
-  // Task 3: strip markdown code fences before parsing
   try { parsed = JSON.parse(stripJsonFences(text)); } catch { return; }
   if (!parsed.worth_saving || !parsed.title || !parsed.content) return;
-
-  const scope = projectScope !== undefined ? projectScope : getProjectScope();
 
   await saveMemory(parsed.title, topic ?? getTopicFromGit(), parsed.content, {
     sessionId,

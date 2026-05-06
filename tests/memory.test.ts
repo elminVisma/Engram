@@ -6,6 +6,7 @@ import {
   decideSave,
   cosineDistance,
   serialize,
+  heuristicExtract,
   SIGNAL_PHRASES,
   DUPLICATE_THRESHOLD,
   SUPERSESSION_THRESHOLD,
@@ -214,5 +215,47 @@ describe('cosineDistance', () => {
     const d = cosineDistance(a, b);
     expect(d).toBeGreaterThanOrEqual(0);
     expect(d).toBeLessThanOrEqual(2);
+  });
+});
+
+// ─── heuristicExtract tests ───────────────────────────────────────────────────
+
+describe('heuristicExtract', () => {
+  it('returns null for text with no signal phrases', () => {
+    expect(heuristicExtract('Here is the code you asked for. Let me explain how this works.')).toBeNull();
+  });
+
+  it('extracts title and content from a sentence containing a signal phrase', () => {
+    const text = 'Some intro. The issue was that the cache key was not being invalidated. This caused stale data to be returned.';
+    const result = heuristicExtract(text);
+    expect(result).not.toBeNull();
+    expect(result!.title.length).toBeGreaterThan(0);
+    expect(result!.content).toContain('cache key');
+    expect(result!.excerpt).toContain('cache key');
+  });
+
+  it('title is at most 60 characters', () => {
+    const text = 'The issue was that the deeply nested configuration object was not being merged correctly because of a prototype chain conflict in the library.';
+    const result = heuristicExtract(text);
+    expect(result!.title.length).toBeLessThanOrEqual(60);
+  });
+
+  it('content includes subsequent sentences up to 3 total', () => {
+    const text = 'The fix is to call flush before close. This ensures all buffers are written. Otherwise data is silently dropped. Extra sentence four.';
+    const result = heuristicExtract(text);
+    expect(result!.content).toContain('flush');
+    expect(result!.content).toContain('buffers');
+    expect(result!.content).toContain('silently dropped');
+  });
+
+  it('is case-insensitive for signal phrase matching', () => {
+    const text = 'TURNS OUT the environment variable was shadowed by the shell.';
+    const result = heuristicExtract(text);
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain('environment variable');
+  });
+
+  it('returns null for text shorter than 20 chars', () => {
+    expect(heuristicExtract('too short')).toBeNull();
   });
 });

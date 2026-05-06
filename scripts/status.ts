@@ -105,7 +105,7 @@ async function main() {
   // ── Environment ───────────────────────────────────────
   console.log(`\n${BOLD}Environment${RESET}`);
   const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
-  console.log(`  ANTHROPIC_API_KEY:    ${hasApiKey ? GREEN + 'set' : RED + 'not set'}${RESET}${!hasApiKey ? ` ${DIM}(auto-remember disabled)${RESET}` : ''}`);
+  console.log(`  ANTHROPIC_API_KEY:    ${hasApiKey ? GREEN + 'set' : GREY + 'not set'}${RESET}${!hasApiKey ? ` ${DIM}(using CLI auth)${RESET}` : ''}`);
   const disableHaiku = process.env.ENGRAM_DISABLE_HAIKU === '1';
   console.log(`  ENGRAM_DISABLE_HAIKU: ${disableHaiku ? YELLOW + '1 (Haiku API calls disabled)' : GREY + 'not set'}${RESET}`);
   const engramModel = process.env.ENGRAM_MODEL;

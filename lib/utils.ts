@@ -138,6 +138,50 @@ export function stripJsonFences(text: string): string {
   return fenced ? fenced[1].trim() : text.trim();
 }
 
+export interface HeuristicExtract {
+  title: string;
+  content: string;
+  excerpt: string;
+}
+
+/**
+ * Extracts a saveable memory from response text without an LLM call.
+ * Finds the first sentence containing a signal phrase, uses it as the anchor.
+ * Returns null if no signal phrase found or text is too short.
+ */
+export function heuristicExtract(text: string): HeuristicExtract | null {
+  if (text.length < 20) return null;
+
+  const sentences = text.match(/[^.!?\n]+[.!?\n]+/g) ?? [];
+  if (sentences.length === 0) return null;
+
+  const lower = text.toLowerCase();
+  let signalSentenceIdx = -1;
+
+  outer:
+  for (const phrase of SIGNAL_PHRASES) {
+    const idx = lower.indexOf(phrase);
+    if (idx === -1) continue;
+    let pos = 0;
+    for (let i = 0; i < sentences.length; i++) {
+      pos += sentences[i].length;
+      if (pos > idx) {
+        signalSentenceIdx = i;
+        break outer;
+      }
+    }
+  }
+
+  if (signalSentenceIdx === -1) return null;
+
+  const contentSentences = sentences.slice(signalSentenceIdx, signalSentenceIdx + 3);
+  const content = contentSentences.join(' ').trim().slice(0, 500);
+  const signalSentence = sentences[signalSentenceIdx].trim();
+  const title = signalSentence.split(/\s+/).slice(0, 8).join(' ').replace(/[.!?,]+$/, '').slice(0, 60);
+
+  return { title, content, excerpt: signalSentence.slice(0, 200) };
+}
+
 // Task 22: decision logic extracted for testability
 export type SaveDecision = 'skip' | 'new' | { supersede: number };
 export function decideSave(candidates: Array<{ id: number; distance: number }>): SaveDecision {
