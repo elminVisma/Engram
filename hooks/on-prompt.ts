@@ -12,7 +12,8 @@
 const [nodeMajor] = process.versions.node.split('.').map(Number);
 if (nodeMajor < 24) process.exit(0);
 
-import { INJECTION_THRESHOLD } from '../lib/memory.ts';
+import { existsSync } from 'fs';
+import { INJECTION_THRESHOLD, getProjectScope } from '../lib/memory.ts';
 import { daemonSearch } from '../daemon/client.ts';
 
 async function main(): Promise<void> {
@@ -22,11 +23,20 @@ async function main(): Promise<void> {
   if (!raw) return;
 
   let prompt = '';
-  try { prompt = JSON.parse(raw).prompt ?? ''; } catch { return; }
+  let sessionCwd = '';
+  try {
+    const input = JSON.parse(raw);
+    prompt = input.prompt ?? '';
+    sessionCwd = input.cwd ?? '';
+  } catch { return; }
   if (prompt.length < 20) return;
 
+  // Resolve project scope against the session's cwd (the hook script cd's into Engram).
+  const gitCwd = sessionCwd && existsSync(sessionCwd) ? sessionCwd : undefined;
+  const scope = getProjectScope(gitCwd);
+
   try {
-    const results = await daemonSearch(prompt, 5);
+    const results = await daemonSearch(prompt, 5, scope);
     const relevant = results.filter(r => r.distance < INJECTION_THRESHOLD);
     if (relevant.length === 0) return;
 

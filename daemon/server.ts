@@ -1,7 +1,8 @@
 #!/usr/bin/env tsx
 /**
  * Engram daemon — loads the embedding model once and serves search/remember
- * over HTTP on localhost:7700. Exits after IDLE_TIMEOUT_MS of inactivity.
+ * over HTTP on localhost:7700. Exits after IDLE_TIMEOUT_MS of inactivity
+ * (set ENGRAM_IDLE_MINUTES=0 to disable; default 120).
  *
  * Usage:
  *   npx tsx daemon/server.ts
@@ -14,12 +15,16 @@ import { search, saveMemory, getProjectScope } from '../lib/memory.ts';
 import type { SaveOptions } from '../lib/memory.ts';
 
 const PORT = parseInt(process.env.ENGRAM_PORT ?? '7700', 10);
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const IDLE_MINUTES = parseInt(process.env.ENGRAM_IDLE_MINUTES ?? '120', 10);
+const IDLE_TIMEOUT_MS = Number.isFinite(IDLE_MINUTES) && IDLE_MINUTES > 0
+  ? IDLE_MINUTES * 60 * 1000
+  : 0;
 
-let idleTimer: NodeJS.Timeout;
+let idleTimer: NodeJS.Timeout | undefined;
 
 function resetIdleTimer(server: http.Server): void {
-  clearTimeout(idleTimer);
+  if (IDLE_TIMEOUT_MS === 0) return;
+  if (idleTimer) clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
     process.stderr.write('[Engram daemon] Idle timeout — shutting down\n');
     server.close(() => process.exit(0));
@@ -75,7 +80,8 @@ async function main(): Promise<void> {
   process.stderr.write('[Engram daemon] Loading model...\n');
   // Warm up the embedding model
   await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'fp32' });
-  process.stderr.write(`[Engram daemon] Ready on port ${PORT}\n`);
+  const idleLabel = IDLE_TIMEOUT_MS === 0 ? 'disabled' : `${IDLE_MINUTES}m`;
+  process.stderr.write(`[Engram daemon] Ready on port ${PORT} (idle timeout: ${idleLabel})\n`);
 
   const server = http.createServer(async (req, res) => {
     resetIdleTimer(server);

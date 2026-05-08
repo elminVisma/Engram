@@ -19,15 +19,29 @@ function getLastAssistantMessage(transcriptPath: string): string {
     const lines = readFileSync(transcriptPath, 'utf-8').trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       const entry = JSON.parse(lines[i]);
-      if (entry.role !== 'assistant') continue;
-      if (typeof entry.content === 'string') return entry.content;
-      if (Array.isArray(entry.content)) {
-        return entry.content
+      if (entry.type !== 'assistant') continue;
+      const content = entry.message?.content ?? entry.content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        const text = content
           .filter((b: { type: string }) => b.type === 'text')
           .map((b: { text?: string }) => b.text ?? '')
           .join('\n')
           .trim();
+        if (text) return text;
       }
+    }
+  } catch { /* silent */ }
+  return '';
+}
+
+/** Walks the transcript backward to find the most recent `cwd` field. */
+function getCwdFromTranscript(transcriptPath: string): string {
+  try {
+    const lines = readFileSync(transcriptPath, 'utf-8').trim().split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const entry = JSON.parse(lines[i]);
+      if (typeof entry.cwd === 'string' && entry.cwd) return entry.cwd;
     }
   } catch { /* silent */ }
   return '';
@@ -41,10 +55,12 @@ async function main(): Promise<void> {
 
   let transcriptPath = '';
   let sessionId = '';
+  let sessionCwd = '';
   try {
     const input = JSON.parse(raw);
     transcriptPath = input.transcript_path ?? '';
     sessionId = input.session_id ?? '';
+    sessionCwd = input.cwd ?? '';
   } catch { return; }
 
   if (!transcriptPath) return;
@@ -56,9 +72,15 @@ async function main(): Promise<void> {
 
   if (!existsSync(transcriptPath)) return;
 
+  // Resolve git context against the session's cwd, not the hook script's cwd
+  // (the hook command cd's into Engram before invoking tsx, so process.cwd() would always be Engram).
+  // Stop hook input doesn't always include cwd, so fall back to reading it from the transcript.
+  const cwdCandidate = sessionCwd || getCwdFromTranscript(transcriptPath);
+  const gitCwd = cwdCandidate && existsSync(cwdCandidate) ? cwdCandidate : undefined;
+
   const lastResponse = getLastAssistantMessage(transcriptPath);
-  const topic = getTopicFromGit();
-  const projectScope = getProjectScope();
+  const topic = getTopicFromGit(gitCwd);
+  const projectScope = getProjectScope(gitCwd);
 
   await autoRemember(lastResponse, topic, sessionId, projectScope);
 }

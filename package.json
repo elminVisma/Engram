@@ -16,6 +16,7 @@
     "reject": "tsx scripts/reject.ts",
     "status": "tsx scripts/status.ts",
     "daemon": "tsx daemon/server.ts",
+    "daemon:stop": "tsx scripts/daemon-stop.ts",
     "test": "vitest run tests/"
   },
   "dependencies": {

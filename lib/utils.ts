@@ -73,17 +73,19 @@ export function sanitizeTopic(topic: string): string {
   return sanitized;
 }
 
-export function getTopicFromGit(): string {
+export function getTopicFromGit(cwd?: string): string {
   try {
     const branch = execSync('git branch --show-current', {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      cwd,
     }).trim();
 
     if (!branch || branch === 'main' || branch === 'master') {
       const repoPath = execSync('git rev-parse --show-toplevel', {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        cwd,
       }).trim();
       return sanitizeTopic(basename(repoPath));
     }
@@ -94,12 +96,13 @@ export function getTopicFromGit(): string {
   }
 }
 
-/** Returns the git remote origin URL for the current working directory, or null. */
-export function getProjectScope(): string | null {
+/** Returns the git remote origin URL for the given cwd (or current dir), or null. */
+export function getProjectScope(cwd?: string): string | null {
   try {
     const remote = execSync('git remote get-url origin', {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      cwd,
     }).trim();
     return remote || null;
   } catch {

@@ -303,9 +303,17 @@ export async function autoRemember(
   if (!responseText || responseText.length < MIN_RESPONSE_LENGTH) return;
   if (!hasSignal(responseText)) return;
 
-  if (process.env.ENGRAM_DISABLE_HAIKU === '1') return;
-
   const scope = projectScope !== undefined ? projectScope : getProjectScope();
+  const haikuDisabled = process.env.ENGRAM_DISABLE_HAIKU === '1';
+
+  if (haikuDisabled) {
+    const extracted = heuristicExtract(responseText);
+    if (!extracted) return;
+    await saveMemory(extracted.title, topic ?? getTopicFromGit(), extracted.content, {
+      sessionId, sourceExcerpt: extracted.excerpt, tier: 'short', projectScope: scope,
+    });
+    return;
+  }
 
   const prompt = `Does this response contain a non-obvious technical learning worth saving to long-term memory?
 
