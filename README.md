@@ -1,7 +1,5 @@
 # Engram
 
-**Claude forgets everything. Engram doesn't.**
-
 Engram is a portable semantic memory layer for Claude Code. Every session leaves a trace. Every trace makes the next session smarter.
 
 ---
