@@ -41,7 +41,7 @@ async function main(): Promise<void> {
     if (relevant.length === 0) return;
 
     // Visibility — user sees this in Claude Code's hook output
-    process.stderr.write(`[Engram] Injecting ${relevant.length} relevant memory${relevant.length > 1 ? 'ies' : 'y'}\n`);
+    process.stderr.write(`[Engram] Injecting ${relevant.length} relevant memor${relevant.length > 1 ? 'ies' : 'y'}\n`);
 
     const lines = [
       '---',

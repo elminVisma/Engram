@@ -5,7 +5,6 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { pipeline } from '@huggingface/transformers';
-import { spawnSync } from 'child_process';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -16,7 +15,8 @@ import {
   serialize, cosineDistance, today, hasSignal,
   sanitizeTopic, getTopicFromGit, getProjectScope,
   chunkText, stripJsonFences, decideSave, heuristicExtract,
-  type MemoryTier, type SaveDecision, type HeuristicExtract,
+  buildClassifyPrompt, parseClassifyOutput, runClassifier,
+  type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
 } from './utils.ts';
 
 export {
@@ -25,7 +25,8 @@ export {
   serialize, cosineDistance, today, hasSignal,
   sanitizeTopic, getTopicFromGit, getProjectScope,
   chunkText, stripJsonFences, decideSave, heuristicExtract,
-  type MemoryTier, type SaveDecision, type HeuristicExtract,
+  buildClassifyPrompt, parseClassifyOutput, runClassifier,
+  type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
 };
 
 const ENGRAM_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,8 +34,6 @@ export const RAW_DIR = join(ENGRAM_DIR, 'memory', 'raw');
 export const DB_PATH = join(ENGRAM_DIR, 'memory', 'memory.db');
 
 const EMBED_MODEL = 'Xenova/all-MiniLM-L6-v2';
-// Task 10: allow override via env var
-const CLASSIFY_MODEL = process.env.ENGRAM_MODEL ?? 'claude-haiku-4-5-20251001';
 
 const MIN_RESPONSE_LENGTH = 200;
 
@@ -59,6 +58,10 @@ export interface SaveOptions {
   tags?: string;
   tier?: MemoryTier;
   projectScope?: string | null;
+  /** Override DB path (test isolation). Defaults to DB_PATH. */
+  dbPath?: string;
+  /** Override markdown root (test isolation). Defaults to RAW_DIR. */
+  rawDir?: string;
 }
 
 /** Open the DB and run schema migrations. */
@@ -80,9 +83,10 @@ type EmbeddingRow = Omit<SearchResult, 'distance'> & { embedding: Uint8Array };
 export async function search(
   query: string,
   topK = 5,
-  projectScope?: string | null
+  projectScope?: string | null,
+  dbPath: string = DB_PATH,
 ): Promise<SearchResult[]> {
-  if (!existsSync(DB_PATH)) return [];
+  if (!existsSync(dbPath)) return [];
 
   const scope = projectScope !== undefined ? projectScope : getProjectScope();
 
@@ -90,7 +94,7 @@ export async function search(
   const out = await extractor(query, { pooling: 'mean', normalize: true });
   const queryEmbedding = serialize(Array.from(out.data as Float32Array));
 
-  const db = openDb(DB_PATH);
+  const db = openDb(dbPath);
 
   const SELECT = `
     SELECT id, path, title, topic, chunk, is_active, superseded_by,
@@ -147,14 +151,18 @@ export async function search(
 }
 
 /** Search including superseded memories — used by the why CLI. */
-export async function searchAll(query: string, topK = 20): Promise<SearchResult[]> {
-  if (!existsSync(DB_PATH)) return [];
+export async function searchAll(
+  query: string,
+  topK = 20,
+  dbPath: string = DB_PATH,
+): Promise<SearchResult[]> {
+  if (!existsSync(dbPath)) return [];
 
   const extractor = await pipeline('feature-extraction', EMBED_MODEL, { dtype: 'fp32' });
   const out = await extractor(query, { pooling: 'mean', normalize: true });
   const queryEmbedding = serialize(Array.from(out.data as Float32Array));
 
-  const db = openDb(DB_PATH);
+  const db = openDb(dbPath);
 
   const rows = db.prepare(`
     SELECT id, path, title, topic, chunk, is_active, superseded_by,
@@ -188,6 +196,8 @@ export async function saveMemory(
   const projectScope = opts.projectScope !== undefined
     ? opts.projectScope
     : (tier === 'short' ? getProjectScope() : null);
+  const dbPath = opts.dbPath ?? DB_PATH;
+  const rawDir = opts.rawDir ?? RAW_DIR;
 
   const mergedOpts: SaveOptions & { tier: MemoryTier; projectScope: string | null } = {
     ...opts,
@@ -195,8 +205,8 @@ export async function saveMemory(
     projectScope,
   };
 
-  if (!existsSync(DB_PATH)) {
-    _writeMarkdown(title, topic, content, mergedOpts);
+  if (!existsSync(dbPath)) {
+    _writeMarkdown(title, topic, content, mergedOpts, rawDir);
     return;
   }
 
@@ -205,7 +215,7 @@ export async function saveMemory(
   const embedding = serialize(Array.from(out.data as Float32Array));
 
   // Task 14: single DB connection with WAL mode
-  const db = openDb(DB_PATH);
+  const db = openDb(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
 
   try {
@@ -224,7 +234,7 @@ export async function saveMemory(
     const supersededId = decision === 'new' ? null : (decision as { supersede: number }).supersede;
 
     // File I/O outside transaction (unavoidable)
-    const filepath = _writeMarkdown(title, topic, content, mergedOpts);
+    const filepath = _writeMarkdown(title, topic, content, mergedOpts, rawDir);
 
     // Write + supersede inside a transaction
     db.exec('BEGIN');
@@ -260,11 +270,12 @@ function _writeMarkdown(
   title: string,
   topic: string,
   content: string,
-  opts: SaveOptions & { tier: MemoryTier; projectScope: string | null }
+  opts: SaveOptions & { tier: MemoryTier; projectScope: string | null },
+  rawDir: string = RAW_DIR,
 ): string {
   // Task 6: sanitize topic for directory/path construction
   const safeTopic = sanitizeTopic(topic);
-  const topicDir = join(RAW_DIR, safeTopic);
+  const topicDir = join(rawDir, safeTopic);
   mkdirSync(topicDir, { recursive: true });
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50);
   // Task 2: add timestamp suffix to prevent filename collisions
@@ -290,9 +301,27 @@ ${content}
   return `${safeTopic}/${filename}`;
 }
 
+// ─── autoRemember pipeline ───────────────────────────────────────────────────
+// The pure pieces — buildClassifyPrompt / parseClassifyOutput / runClassifier
+// — live in lib/utils.ts so they can be tested without loading transformers.
+
+/** Save via heuristicExtract — used when the classifier is disabled or fails. */
+async function fallbackHeuristic(
+  responseText: string,
+  topic: string | undefined,
+  sessionId: string | undefined,
+  scope: string | null,
+): Promise<void> {
+  const extracted = heuristicExtract(responseText);
+  if (!extracted) return;
+  await saveMemory(extracted.title, topic ?? getTopicFromGit(), extracted.content, {
+    sessionId, sourceExcerpt: extracted.excerpt, tier: 'short', projectScope: scope,
+  });
+}
+
 /**
- * Use Haiku to decide if a response contains a learning worth saving.
- * Saves as short-term memory scoped to the current project.
+ * Use Haiku (or the heuristic fallback) to decide if a response contains a
+ * learning worth saving. Saves as short-term memory scoped to the current project.
  */
 export async function autoRemember(
   responseText: string,
@@ -304,70 +333,21 @@ export async function autoRemember(
   if (!hasSignal(responseText)) return;
 
   const scope = projectScope !== undefined ? projectScope : getProjectScope();
-  const haikuDisabled = process.env.ENGRAM_DISABLE_HAIKU === '1';
 
-  if (haikuDisabled) {
-    const extracted = heuristicExtract(responseText);
-    if (!extracted) return;
-    await saveMemory(extracted.title, topic ?? getTopicFromGit(), extracted.content, {
-      sessionId, sourceExcerpt: extracted.excerpt, tier: 'short', projectScope: scope,
-    });
-    return;
+  if (process.env.ENGRAM_DISABLE_HAIKU === '1') {
+    return fallbackHeuristic(responseText, topic, sessionId, scope);
   }
 
-  const prompt = `Does this response contain a non-obvious technical learning worth saving to long-term memory?
+  let raw: string;
+  try { raw = runClassifier(buildClassifyPrompt(responseText)); }
+  catch { return fallbackHeuristic(responseText, topic, sessionId, scope); }
 
-SAVE: non-obvious discoveries, bug root causes, patterns, constraints, gotchas, non-obvious decisions.
-SKIP: routine code generation, obvious explanations, status updates, conversational filler.
+  const decision = parseClassifyOutput(raw);
+  if (!decision || !decision.worth_saving || !decision.title || !decision.content) return;
 
-Response:
-${responseText.slice(0, 2000)}
-
-JSON only — no other text:
-{"worth_saving": true, "title": "under 8 words", "content": "1-3 sentences", "excerpt": "verbatim sentence that triggered this"}
-or
-{"worth_saving": false}`;
-
-  let text = '';
-  try {
-    // --setting-sources "" prevents loading ~/.claude/settings.json (avoids hook recursion)
-    // spawnSync instead of execSync so exit code 1 ("Reached max turns") doesn't throw
-    const result = spawnSync(
-      'claude',
-      ['-p', '-', '--model', CLASSIFY_MODEL, '--no-session-persistence',
-       '--max-turns', '1', '--output-format', 'json', '--setting-sources', ''],
-      { input: prompt, encoding: 'utf-8', timeout: 30_000 }
-    );
-    const raw = (result.stdout ?? '').trim();
-    if (!raw) throw new Error(result.stderr ?? 'no output');
-    // CLI wraps output in {"type":"result","result":"..."}
-    if (raw.startsWith('{')) {
-      try {
-        const wrapper = JSON.parse(raw);
-        text = (wrapper.result ?? wrapper.text ?? raw).trim();
-      } catch { text = raw; }
-    } else {
-      text = raw;
-    }
-  } catch {
-    // CLI unavailable or timed out — fall back to heuristic
-    const extracted = heuristicExtract(responseText);
-    if (!extracted) return;
-    await saveMemory(extracted.title, topic ?? getTopicFromGit(), extracted.content, {
-      sessionId, sourceExcerpt: extracted.excerpt, tier: 'short', projectScope: scope,
-    });
-    return;
-  }
-
-  if (!text) return;
-
-  let parsed: { worth_saving: boolean; title?: string; content?: string; excerpt?: string };
-  try { parsed = JSON.parse(stripJsonFences(text)); } catch { return; }
-  if (!parsed.worth_saving || !parsed.title || !parsed.content) return;
-
-  await saveMemory(parsed.title, topic ?? getTopicFromGit(), parsed.content, {
+  await saveMemory(decision.title, topic ?? getTopicFromGit(), decision.content, {
     sessionId,
-    sourceExcerpt: parsed.excerpt,
+    sourceExcerpt: decision.excerpt,
     tier: 'short',
     projectScope: scope,
   });

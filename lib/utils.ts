@@ -3,7 +3,7 @@
  * Imported by lib/memory.ts, tests, and scripts.
  */
 
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { basename } from 'path';
 
 export const DUPLICATE_THRESHOLD = 0.15;
@@ -34,7 +34,13 @@ export const SIGNAL_PHRASES = [
   'what this means', 'worth remembering',
 ];
 
-export type MemoryTier = 'short' | 'long';
+export type MemoryTier =
+  | 'short'        // default — project-scoped, lifetime managed by access/decay
+  | 'long'         // global, durable
+  | 'pinned'       // injected at SessionStart for matching scope
+  | 'user'         // user-level facts; surface in every project
+  | 'shared'       // cross-project within a scope_group
+  | 'provisional'; // newly saved, promoted/demoted by access
 
 export function serialize(vector: number[]): Buffer {
   // Float32Array owns its own ArrayBuffer (byteOffset=0), so Buffer.from produces
@@ -193,4 +199,79 @@ export function decideSave(candidates: Array<{ id: number; distance: number }>):
   if (nearest.distance < DUPLICATE_THRESHOLD) return 'skip';
   if (nearest.distance < SUPERSESSION_THRESHOLD) return { supersede: nearest.id };
   return 'new';
+}
+
+// ─── autoRemember pipeline (pure / shell-only — no transformer deps) ─────────
+
+const CLASSIFY_MODEL = process.env.ENGRAM_MODEL ?? 'claude-haiku-4-5-20251001';
+
+export interface ClassifyDecision {
+  worth_saving: boolean;
+  title?: string;
+  content?: string;
+  excerpt?: string;
+}
+
+/** Build the prompt sent to the classifier. Pure. */
+export function buildClassifyPrompt(responseText: string): string {
+  return `Does this response contain a non-obvious technical learning worth saving to long-term memory?
+
+SAVE: non-obvious discoveries, bug root causes, patterns, constraints, gotchas, non-obvious decisions.
+SKIP: routine code generation, obvious explanations, status updates, conversational filler.
+
+Response:
+${responseText.slice(0, 2000)}
+
+JSON only — no other text:
+{"worth_saving": true, "title": "under 8 words", "content": "1-3 sentences", "excerpt": "verbatim sentence that triggered this"}
+or
+{"worth_saving": false}`;
+}
+
+/**
+ * Parse the classifier's stdout into a ClassifyDecision.
+ * Handles the CLI's `{type:"result",result:"..."}` wrapper and ```json fences.
+ * Returns null if the output is missing, unparseable, or shape-invalid.
+ */
+export function parseClassifyOutput(raw: string): ClassifyDecision | null {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return null;
+
+  // Unwrap the CLI's JSON wrapper if present
+  let inner = trimmed;
+  if (trimmed.startsWith('{')) {
+    try {
+      const wrapper = JSON.parse(trimmed);
+      if (typeof wrapper === 'object' && wrapper !== null && ('result' in wrapper || 'text' in wrapper)) {
+        inner = String(wrapper.result ?? wrapper.text ?? trimmed).trim();
+      }
+    } catch { /* not the wrapper — treat raw text as the model's reply */ }
+  }
+  if (!inner) return null;
+
+  let parsed: unknown;
+  try { parsed = JSON.parse(stripJsonFences(inner)); } catch { return null; }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const p = parsed as ClassifyDecision;
+  if (typeof p.worth_saving !== 'boolean') return null;
+  return p;
+}
+
+/**
+ * Shell out to the Claude CLI to classify the response.
+ * Returns raw stdout text. Throws if the CLI is unavailable or produced no output.
+ *
+ * `--setting-sources ""` prevents loading `~/.claude/settings.json` (avoids hook recursion).
+ * Uses spawnSync so exit code 1 ("Reached max turns") doesn't throw.
+ */
+export function runClassifier(prompt: string): string {
+  const result = spawnSync(
+    'claude',
+    ['-p', '-', '--model', CLASSIFY_MODEL, '--no-session-persistence',
+     '--max-turns', '1', '--output-format', 'json', '--setting-sources', ''],
+    { input: prompt, encoding: 'utf-8', timeout: 30_000 }
+  );
+  const raw = (result.stdout ?? '').trim();
+  if (!raw) throw new Error(result.stderr || 'classifier produced no output');
+  return raw;
 }

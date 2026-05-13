@@ -231,7 +231,7 @@ curl http://localhost:7700/health
 # → {"status":"ok","pid":12345}
 ```
 
-The daemon exits automatically after 30 minutes of inactivity.
+The daemon exits automatically after 120 minutes of inactivity (override via `ENGRAM_IDLE_MINUTES`; set to `0` to disable).
 
 ### Fallback
 
@@ -325,16 +325,28 @@ All tuneable behaviour can be overridden without editing source.
 | `ENGRAM_PROMOTE_THRESHOLD` | `10` | Number of accesses before a short-term memory is eligible for promotion to long-term. Lower = more aggressive promotion. |
 | `ENGRAM_DECAY_RATE` | *(per-memory, default `0.02`)* | Global decay rate override applied to all short-term memories during `npm run decay`. Calibrated for daily runs. Use `0.005` for weekly. |
 | `ENGRAM_PORT` | `7700` | Port the daemon listens on. Must match between server and client. |
+| `ENGRAM_IDLE_MINUTES` | `120` | Minutes of inactivity before the daemon exits. Set to `0` to disable. |
 
 ---
 
 ## Automatic Mode — Claude Code Hooks
 
-Two hooks make Engram fully automatic. Add both to `~/.claude/settings.json`:
+Three hooks make Engram fully automatic. Add all three to `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx /path/to/Engram/hooks/on-session-start.ts"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "",
@@ -361,6 +373,15 @@ Two hooks make Engram fully automatic. Add both to `~/.claude/settings.json`:
 }
 ```
 
+### `hooks/on-session-start.ts` — pinned-memory injection (at session start)
+
+1. Resolves the project scope from the session's cwd
+2. Loads pinned memories for that scope (plus global pins, NULL scope)
+3. Caps to `ENGRAM_PIN_LIMIT` (default 10) and ~20k chars
+4. Injects as a system prompt block so Claude sees pinned context from the first turn
+
+Pinned memories are the closest thing Engram has to "always-on" memory — use them for stable facts the model should never forget (preferences, key architecture decisions, recurring gotchas).
+
 ### `hooks/on-prompt.ts` — auto-search (on every prompt)
 
 1. Embeds your prompt locally
@@ -376,7 +397,19 @@ Two hooks make Engram fully automatic. Add both to `~/.claude/settings.json`:
 4. If signals found → sends response to Claude Haiku: *"is this worth saving?"*
 5. If yes → checks for duplicates → embeds → saves to `memory/raw/` → indexes as short-term, scoped to the current project
 
-**Both hooks fail silently.** Nothing ever blocks Claude or surfaces errors to you.
+**All three hooks fail silently.** Nothing ever blocks Claude or surfaces errors to you.
+
+### Pinning memories
+
+```bash
+npm run pin -- --id 42               # pin memory #42 with auto-assigned order
+npm run pin -- --id 42 --order 1     # pin with explicit order (lower = first)
+npm run pin -- --unpin --id 42       # unpin
+npm run pin -- --list                # list pins for current project
+npm run pin -- --list --all          # list pins across all scopes
+```
+
+Also exposed via MCP tools `pin_memory`, `unpin_memory`, `list_pinned` so Claude can pin a memory when you say "pin this".
 
 ### Why Haiku for the judgment call
 

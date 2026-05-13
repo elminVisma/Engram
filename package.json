@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24.0.0" },
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "reindex": "tsx scripts/reindex.ts",
     "search": "tsx scripts/search.ts",
@@ -17,11 +19,16 @@
     "status": "tsx scripts/status.ts",
     "daemon": "tsx daemon/server.ts",
     "daemon:stop": "tsx scripts/daemon-stop.ts",
-    "test": "vitest run tests/"
+    "mcp": "tsx mcp/server.ts",
+    "pin": "tsx scripts/pin.ts",
+    "test": "vitest run tests/",
+    "smoke": "tsx tests/smoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.51.0",
-    "@huggingface/transformers": "^3.0.0"
+    "@huggingface/transformers": "^3.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

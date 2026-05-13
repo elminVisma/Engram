@@ -6,7 +6,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const CURRENT_VERSION = 4;
+export const CURRENT_VERSION = 5;
 
 // Each migration: [fromVersion, toVersion, sql]
 export const MIGRATIONS: [number, number, string][] = [
@@ -39,6 +39,16 @@ export const MIGRATIONS: [number, number, string][] = [
   `],
   [3, 4, `
     ALTER TABLE memories ADD COLUMN embedding BLOB;
+  `],
+  // Phase 0 of the true-memory overhaul: pinned/user/shared/provisional tiers,
+  // pin_order for SessionStart-injected pins, scope_group for cross-project shared tier,
+  // and an index to keep tier+scope filters cheap.
+  [4, 5, `
+    ALTER TABLE memories ADD COLUMN pin_order     INTEGER;
+    ALTER TABLE memories ADD COLUMN scope_group   TEXT;
+    ALTER TABLE memories ADD COLUMN previous_tier TEXT;
+    CREATE INDEX IF NOT EXISTS idx_memories_tier_scope
+      ON memories (memory_tier, project_scope);
   `],
 ];
 
