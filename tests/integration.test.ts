@@ -579,6 +579,60 @@ describe('pruneProvisional()', () => {
   });
 });
 
+// ─── Phase 5: multiSearch ─────────────────────────────────────────────────────
+
+describe('multiSearch()', () => {
+  it('returns candidates with high distance when no semantic match exists', async () => {
+    const { multiSearch } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    seed(db, { title: 'ws-base', embedKey: 'ws-base', tier: 'short' });
+    db.close();
+
+    // react-base is orthogonal to ws-base — candidate returned but distance ~1
+    const result = await multiSearch('react-base', null, dbPath);
+    expect(result.concepts).toBeInstanceOf(Array);
+    expect(result.queries).toBeInstanceOf(Array);
+    expect(result.queries.length).toBeGreaterThanOrEqual(1);
+    expect(result.candidates.length).toBeGreaterThan(0);
+    expect(result.candidates[0].distance).toBeGreaterThan(0.9);
+  });
+
+  it('returns matching candidates sorted by distance', async () => {
+    const { multiSearch } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    seed(db, { title: 'jwt-base', embedKey: 'jwt-base', tier: 'long' });
+    seed(db, { title: 'ws-base',  embedKey: 'ws-base',  tier: 'long' });
+    db.close();
+
+    const result = await multiSearch('jwt-near', null, dbPath);
+    expect(result.candidates.length).toBeGreaterThan(0);
+    expect(result.candidates[0].title).toBe('jwt-base');
+    expect(result.candidates[0].distance).toBeLessThan(0.05);
+  });
+
+  it('deduplicates candidates keeping the lowest distance', async () => {
+    const { multiSearch } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    const id = seed(db, { title: 'jwt-base', embedKey: 'jwt-base', tier: 'long' });
+    db.close();
+
+    // Use a prompt where heuristic extraction produces concepts that also match
+    // the same memory. jwt-base + jwt-near both map to the same row — only one
+    // entry should appear in candidates.
+    const result = await multiSearch('jwt-base jwt-near', null, dbPath);
+    const ids = result.candidates.map(c => c.id);
+    expect(ids.filter(x => x === id)).toHaveLength(1);
+  });
+
+  it('returns empty when DB does not exist', async () => {
+    const { multiSearch } = await import('../lib/memory.ts');
+    const result = await multiSearch('jwt-near', null, join(workDir, 'ghost.db'));
+    expect(result.candidates).toEqual([]);
+    expect(result.concepts).toEqual([]);
+    expect(result.queries).toEqual([]);
+  });
+});
+
 // ─── Phase 4: promoteProvisional ──────────────────────────────────────────────
 
 describe('promoteProvisional()', () => {

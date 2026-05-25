@@ -4,7 +4,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { handleSaveMemory, handlePinMemory, handleUnpinMemory, handleListPinned } from '../mcp/handlers.ts';
+import { handleSaveMemory, handlePinMemory, handleUnpinMemory, handleListPinned, handleExplainRecall } from '../mcp/handlers.ts';
+import type { SearchResult } from '../lib/memory.ts';
 
 function makeDeps(overrides: Partial<{
   save: ReturnType<typeof vi.fn>;
@@ -155,6 +156,92 @@ describe('handleUnpinMemory', () => {
     const deps = { unpin: vi.fn().mockImplementation(() => { throw new Error('nope'); }) };
     const res = await handleUnpinMemory({ id: 1 }, deps);
     expect(res).toEqual({ ok: false, error: 'nope' });
+  });
+});
+
+// ─── handleExplainRecall ──────────────────────────────────────────────────────
+
+describe('handleExplainRecall', () => {
+  function makeSearchResult(overrides: Partial<SearchResult> = {}): SearchResult {
+    return {
+      id: 1, path: 'a.md', title: 'Alpha', topic: 'auth', chunk: 'body',
+      distance: 0.3, is_active: 1, superseded_by: null,
+      memory_tier: 'short', project_scope: null, confidence: 1.0, access_count: 0,
+      ...overrides,
+    };
+  }
+
+  function makeExplainDeps(overrides: Partial<{
+    multiSearch: ReturnType<typeof vi.fn>;
+    defaultScope: () => string | null;
+    injectionThreshold: number;
+  }> = {}) {
+    return {
+      multiSearch: overrides.multiSearch ?? vi.fn().mockResolvedValue({
+        concepts: ['auth', 'jwt'],
+        queries: ['raw prompt', 'auth', 'jwt'],
+        candidates: [makeSearchResult()],
+      }),
+      defaultScope: overrides.defaultScope ?? (() => 'https://example.com/repo.git'),
+      injectionThreshold: overrides.injectionThreshold ?? 0.75,
+    };
+  }
+
+  it('rejects when prompt is missing or blank', async () => {
+    const deps = makeExplainDeps();
+    expect(await handleExplainRecall({ prompt: '' }, deps))
+      .toEqual({ ok: false, error: expect.stringMatching(/prompt/i) });
+    expect(await handleExplainRecall({ prompt: '   ' }, deps))
+      .toEqual({ ok: false, error: expect.stringMatching(/prompt/i) });
+    expect(deps.multiSearch).not.toHaveBeenCalled();
+  });
+
+  it('returns concepts, queries count, and candidates', async () => {
+    const deps = makeExplainDeps();
+    const res = await handleExplainRecall({ prompt: 'how does jwt auth work' }, deps);
+    expect(res.ok).toBe(true);
+    expect(res.concepts).toEqual(['auth', 'jwt']);
+    expect(res.queries).toBe(3);
+    expect(res.candidates).toHaveLength(1);
+    expect(res.candidates![0]).toMatchObject({ id: 1, title: 'Alpha', topic: 'auth', memory_tier: 'short' });
+  });
+
+  it('marks would_inject:true for candidates below threshold', async () => {
+    const deps = makeExplainDeps({
+      injectionThreshold: 0.75,
+      multiSearch: vi.fn().mockResolvedValue({
+        concepts: [],
+        queries: ['q'],
+        candidates: [
+          makeSearchResult({ id: 1, distance: 0.5 }),
+          makeSearchResult({ id: 2, distance: 0.8 }),
+        ],
+      }),
+    });
+    const res = await handleExplainRecall({ prompt: 'test prompt here' }, deps);
+    expect(res.ok).toBe(true);
+    expect(res.candidates!.find(c => c.id === 1)!.would_inject).toBe(true);
+    expect(res.candidates!.find(c => c.id === 2)!.would_inject).toBe(false);
+  });
+
+  it('uses explicit scope when provided', async () => {
+    const deps = makeExplainDeps();
+    await handleExplainRecall({ prompt: 'some test prompt here', scope: 'https://other/repo.git' }, deps);
+    expect(deps.multiSearch).toHaveBeenCalledWith('some test prompt here', 'https://other/repo.git');
+  });
+
+  it('falls back to defaultScope when scope omitted', async () => {
+    const deps = makeExplainDeps();
+    await handleExplainRecall({ prompt: 'some test prompt here' }, deps);
+    expect(deps.multiSearch).toHaveBeenCalledWith('some test prompt here', 'https://example.com/repo.git');
+  });
+
+  it('returns ok:false when multiSearch throws', async () => {
+    const deps = makeExplainDeps({
+      multiSearch: vi.fn().mockRejectedValue(new Error('db error')),
+    });
+    const res = await handleExplainRecall({ prompt: 'some test prompt here' }, deps);
+    expect(res).toEqual({ ok: false, error: 'db error' });
   });
 });
 

@@ -18,6 +18,8 @@ import {
   findScopeGroup, loadEngramConfig, getScopeGroup,
   buildClassifyPrompt, parseClassifyOutput, runClassifier,
   isPruneable, isHardDeletable,
+  extractConceptsHeuristic, buildConceptsPrompt, parseConceptsOutput,
+  buildRerankPrompt, parseRerankOutput, MAX_CONCEPTS,
   type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
   type PrunableMemory, type HardDeletableMemory,
 } from './utils.ts';
@@ -31,6 +33,8 @@ export {
   findScopeGroup, loadEngramConfig, getScopeGroup,
   buildClassifyPrompt, parseClassifyOutput, runClassifier,
   isPruneable, isHardDeletable, PRUNE_AGE_DAYS, HARD_DELETE_AGE_DAYS,
+  extractConceptsHeuristic, buildConceptsPrompt, parseConceptsOutput,
+  buildRerankPrompt, parseRerankOutput, MAX_CONCEPTS,
   type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
   type PrunableMemory, type HardDeletableMemory,
 };
@@ -123,9 +127,9 @@ export async function search(
     : [];
 
   const shortTerm = scope !== null
-    ? (db.prepare(`${SELECT} AND memory_tier = 'short' AND (project_scope = ? OR project_scope IS NULL)`)
+    ? (db.prepare(`${SELECT} AND memory_tier IN ('short', 'provisional') AND (project_scope = ? OR project_scope IS NULL)`)
         .all(scope) as EmbeddingRow[])
-    : (db.prepare(`${SELECT} AND memory_tier = 'short'`)
+    : (db.prepare(`${SELECT} AND memory_tier IN ('short', 'provisional')`)
         .all() as EmbeddingRow[]);
 
   // Deduplicate by id, compute distances, sort
@@ -199,6 +203,41 @@ export async function searchAll(
     }))
     .sort((a, b) => a.distance - b.distance)
     .slice(0, topK);
+}
+
+export interface MultiSearchResult {
+  concepts: string[];
+  queries: string[];
+  candidates: SearchResult[];
+}
+
+/**
+ * Multi-query search: extracts heuristic concepts from the prompt, searches
+ * for the raw prompt plus each concept, then unions results keeping the lowest
+ * (best) distance per memory id. Does NOT increment access_count — read-only.
+ */
+export async function multiSearch(
+  prompt: string,
+  projectScope?: string | null,
+  dbPath: string = DB_PATH,
+): Promise<MultiSearchResult> {
+  if (!existsSync(dbPath)) return { concepts: [], queries: [], candidates: [] };
+
+  const concepts = extractConceptsHeuristic(prompt);
+  const queries = [prompt, ...concepts];
+  const CANDIDATE_LIMIT = 20;
+
+  const byId = new Map<number, SearchResult>();
+  for (const q of queries) {
+    const results = await search(q, CANDIDATE_LIMIT, projectScope, dbPath);
+    for (const r of results) {
+      const existing = byId.get(r.id);
+      if (!existing || existing.distance > r.distance) byId.set(r.id, r);
+    }
+  }
+
+  const candidates = [...byId.values()].sort((a, b) => a.distance - b.distance);
+  return { concepts, queries, candidates };
 }
 
 /** Write a memory to disk, handle supersession, and index. */

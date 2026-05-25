@@ -3,7 +3,7 @@
  * Kept transport-free so it can be unit-tested without the MCP SDK.
  */
 
-import type { SaveOptions, MemoryTier } from '../lib/memory.ts';
+import type { SaveOptions, MemoryTier, SearchResult, MultiSearchResult } from '../lib/memory.ts';
 import type { PinnedMemory } from '../lib/pin.ts';
 
 export interface SaveMemoryInput {
@@ -96,6 +96,62 @@ export async function handleUnpinMemory(
   try {
     deps.unpin(id);
     return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+// ─── explain_recall ───────────────────────────────────────────────────────────
+
+export interface ExplainRecallInput { prompt: string; scope?: string; }
+
+export interface ExplainRecallCandidate {
+  id: number;
+  title: string;
+  topic: string;
+  memory_tier: string;
+  distance: number;
+  would_inject: boolean;
+}
+
+export interface ExplainRecallResult {
+  ok: boolean;
+  concepts?: string[];
+  queries?: number;
+  candidates?: ExplainRecallCandidate[];
+  error?: string;
+}
+
+export interface ExplainRecallDeps {
+  multiSearch: (prompt: string, scope: string | null) => Promise<MultiSearchResult>;
+  defaultScope: () => string | null;
+  injectionThreshold: number;
+}
+
+export async function handleExplainRecall(
+  input: ExplainRecallInput,
+  deps: ExplainRecallDeps,
+): Promise<ExplainRecallResult> {
+  const prompt = (input.prompt ?? '').trim();
+  if (!prompt) return { ok: false, error: 'prompt is required' };
+
+  const scope = input.scope ?? deps.defaultScope();
+
+  try {
+    const { concepts, queries, candidates } = await deps.multiSearch(prompt, scope);
+    return {
+      ok: true,
+      concepts,
+      queries: queries.length,
+      candidates: candidates.map(r => ({
+        id: r.id,
+        title: r.title,
+        topic: r.topic,
+        memory_tier: r.memory_tier,
+        distance: r.distance,
+        would_inject: r.distance < deps.injectionThreshold,
+      })),
+    };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }

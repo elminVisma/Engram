@@ -17,6 +17,12 @@ import {
   loadEngramConfig,
   isPruneable,
   isHardDeletable,
+  extractConceptsHeuristic,
+  buildConceptsPrompt,
+  parseConceptsOutput,
+  buildRerankPrompt,
+  parseRerankOutput,
+  MAX_CONCEPTS,
   PRUNE_AGE_DAYS,
   HARD_DELETE_AGE_DAYS,
   USER_TIER_PHRASES,
@@ -608,5 +614,192 @@ describe('isHardDeletable', () => {
 
   it('HARD_DELETE_AGE_DAYS is 60', () => {
     expect(HARD_DELETE_AGE_DAYS).toBe(60);
+  });
+});
+
+// ─── Phase 5: extractConceptsHeuristic ───────────────────────────────────────
+
+describe('extractConceptsHeuristic', () => {
+  it('extracts backtick code spans', () => {
+    const result = extractConceptsHeuristic('Use `useState` and `useEffect` in React.');
+    expect(result).toContain('useState');
+    expect(result).toContain('useEffect');
+  });
+
+  it('extracts PascalCase technical terms', () => {
+    const result = extractConceptsHeuristic('The PostgreSQL database uses TypeScript.');
+    expect(result).toContain('PostgreSQL');
+    expect(result).toContain('TypeScript');
+  });
+
+  it('extracts camelCase identifiers', () => {
+    const result = extractConceptsHeuristic('Call getTopicFromGit to resolve the topic.');
+    expect(result).toContain('getTopicFromGit');
+  });
+
+  it('extracts ALL_CAPS abbreviations (3+ chars)', () => {
+    const result = extractConceptsHeuristic('The JWT token expired due to the SQL query.');
+    expect(result).toContain('JWT');
+    expect(result).toContain('SQL');
+  });
+
+  it('does not include common English words', () => {
+    const result = extractConceptsHeuristic('The function should return the value.');
+    expect(result).not.toContain('The');
+    expect(result).not.toContain('This');
+  });
+
+  it('returns at most MAX_CONCEPTS results', () => {
+    const result = extractConceptsHeuristic(
+      '`useState` `useEffect` `useCallback` `useMemo` `useRef` `useContext` PostgreSQL TypeScript',
+    );
+    expect(result.length).toBeLessThanOrEqual(MAX_CONCEPTS);
+  });
+
+  it('returns empty array for plain text with no technical terms', () => {
+    const result = extractConceptsHeuristic('how do i fix this problem');
+    expect(result.length).toBe(0);
+  });
+
+  it('MAX_CONCEPTS defaults to 5', () => {
+    expect(MAX_CONCEPTS).toBe(5);
+  });
+});
+
+// ─── Phase 5: buildConceptsPrompt ────────────────────────────────────────────
+
+describe('buildConceptsPrompt', () => {
+  it('includes the prompt text', () => {
+    const p = buildConceptsPrompt('How does JWT authentication work in Node.js?');
+    expect(p).toContain('JWT authentication');
+  });
+
+  it('asks for a JSON array', () => {
+    const p = buildConceptsPrompt('some prompt');
+    expect(p).toContain('JSON');
+  });
+
+  it('truncates long prompts to at most 500 chars of original text', () => {
+    const long = 'x'.repeat(1000);
+    const p = buildConceptsPrompt(long);
+    const match = p.match(/Message: ([^\n]+)/);
+    expect(match![1].length).toBeLessThanOrEqual(500);
+  });
+});
+
+// ─── Phase 5: parseConceptsOutput ────────────────────────────────────────────
+
+describe('parseConceptsOutput', () => {
+  it('parses a plain JSON array', () => {
+    const result = parseConceptsOutput('["JWT", "authentication", "Node.js"]');
+    expect(result).toEqual(['JWT', 'authentication', 'Node.js']);
+  });
+
+  it('parses fenced JSON', () => {
+    const result = parseConceptsOutput('```json\n["A", "B"]\n```');
+    expect(result).toEqual(['A', 'B']);
+  });
+
+  it('unwraps CLI result wrapper', () => {
+    const wrapped = JSON.stringify({ type: 'result', result: '["A", "B"]' });
+    expect(parseConceptsOutput(wrapped)).toEqual(['A', 'B']);
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(parseConceptsOutput('')).toEqual([]);
+    expect(parseConceptsOutput('   ')).toEqual([]);
+  });
+
+  it('returns empty array for malformed JSON', () => {
+    expect(parseConceptsOutput('{invalid}')).toEqual([]);
+  });
+
+  it('returns empty array when parsed value is not an array', () => {
+    expect(parseConceptsOutput('{"key": "val"}')).toEqual([]);
+  });
+
+  it('filters out non-string entries', () => {
+    const result = parseConceptsOutput('["A", 42, null, "B"]');
+    expect(result).toEqual(['A', 'B']);
+  });
+
+  it('limits output to MAX_CONCEPTS', () => {
+    const many = JSON.stringify(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
+    const result = parseConceptsOutput(many);
+    expect(result.length).toBeLessThanOrEqual(MAX_CONCEPTS);
+  });
+});
+
+// ─── Phase 5: buildRerankPrompt ───────────────────────────────────────────────
+
+describe('buildRerankPrompt', () => {
+  const candidates = [
+    { id: 1, title: 'JWT fix', chunk: 'The issue was with the token expiry.' },
+    { id: 2, title: 'WebSocket drop', chunk: 'Turns out the WS connection dropped silently.' },
+  ];
+
+  it('includes the query', () => {
+    const p = buildRerankPrompt('JWT token issue', candidates);
+    expect(p).toContain('JWT token issue');
+  });
+
+  it('includes candidate ids', () => {
+    const p = buildRerankPrompt('query', candidates);
+    expect(p).toContain('1');
+    expect(p).toContain('2');
+  });
+
+  it('includes candidate titles', () => {
+    const p = buildRerankPrompt('query', candidates);
+    expect(p).toContain('JWT fix');
+    expect(p).toContain('WebSocket drop');
+  });
+
+  it('asks for a JSON array', () => {
+    const p = buildRerankPrompt('query', candidates);
+    expect(p).toContain('JSON');
+  });
+});
+
+// ─── Phase 5: parseRerankOutput ───────────────────────────────────────────────
+
+describe('parseRerankOutput', () => {
+  const ids = [1, 2, 3];
+
+  it('returns ids in ranked order', () => {
+    const result = parseRerankOutput('[3, 1, 2]', ids);
+    expect(result).toEqual([3, 1, 2]);
+  });
+
+  it('appends unmentioned ids at the end', () => {
+    const result = parseRerankOutput('[3]', ids);
+    expect(result[0]).toBe(3);
+    expect(result).toContain(1);
+    expect(result).toContain(2);
+    expect(result.length).toBe(3);
+  });
+
+  it('filters out ids not in the candidate list', () => {
+    const result = parseRerankOutput('[99, 1, 2]', ids);
+    expect(result).not.toContain(99);
+  });
+
+  it('falls back to original order on empty input', () => {
+    expect(parseRerankOutput('', ids)).toEqual(ids);
+  });
+
+  it('falls back to original order on parse failure', () => {
+    expect(parseRerankOutput('{bad json}', ids)).toEqual(ids);
+  });
+
+  it('unwraps CLI result wrapper', () => {
+    const wrapped = JSON.stringify({ type: 'result', result: '[2, 1]' });
+    const result = parseRerankOutput(wrapped, [1, 2]);
+    expect(result[0]).toBe(2);
+    expect(result[1]).toBe(1);
+  });
+
+  it('falls back to original order when parsed value is not an array', () => {
+    expect(parseRerankOutput('{"ids": [1,2]}', ids)).toEqual(ids);
   });
 });

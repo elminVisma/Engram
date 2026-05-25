@@ -34,24 +34,28 @@ Fully automatic in both directions. You just work.
 
 ## Tiered Memory
 
-Engram keeps two classes of memory:
+Engram uses six memory tiers:
 
 | Tier | Scope | Lifespan | When used |
 |---|---|---|---|
-| **Short-term** | Per-project (git remote) | Decays over time | Project-specific patterns, in-flight context, local gotchas |
-| **Long-term** | Global (cross-project) | Permanent | Principles, architectural patterns, hard-won lessons |
+| **pinned** | Per-project or global | Permanent | Critical context injected at every SessionStart |
+| **user** | Global (all projects) | Permanent | User preferences, workflow habits, personal style |
+| **shared** | Scope group (related repos) | Permanent | Shared patterns across a set of repos (e.g. all payroll repos) |
+| **long** | Global (cross-project) | Permanent | Principles, architectural decisions, hard-won lessons |
+| **short** | Per-project (git remote) | Decays over time | Project-specific patterns, in-flight context, local gotchas |
+| **provisional** | Per-project | 14 days (if unaccessed) | Auto-saved learnings that need to earn promotion |
 
-Every new auto-saved memory starts as **short-term**, tagged to the project it came from. When a memory is accessed repeatedly (default: 3 times), it is promoted to **long-term** and becomes globally available across all projects.
-
-Short-term memories decay in confidence over time. Ones that are never accessed again fade out automatically — keeping memory lean and relevant.
+Every new auto-saved memory starts as **provisional**. After enough accesses (`ENGRAM_PROMOTE_THRESHOLD`, default 10), it is promoted to **short**. Short-term memories decay in confidence over time; those never accessed again fade out automatically.
 
 ```
-Session ends
-  → memory saved as short-term, scoped to this project's git remote
-  → accessed again in a later session → access_count increments
-  → access_count reaches threshold → npm run promote --apply
-  → memory becomes long-term, project scope cleared
+Response saved → provisional (scoped to project)
+  → accessed repeatedly → promoted to short
+  → accessed threshold reached → promoted to long (global)
+
+Provisionals never accessed → pruned after 14 days (npm run prune)
 ```
+
+Pinned memories are the "always-on" tier. They inject at SessionStart via `hooks/on-session-start.ts`, before the first prompt — ideal for stable facts the model should never forget.
 
 ---
 
@@ -138,8 +142,12 @@ npm run reindex
 | `search.ts` | `npm run search -- "<query>"` | Semantic search over memory |
 | `remember.ts` | `npm run remember -- --topic ... --title ...` | Write and immediately index a new memory |
 | `why.ts` | `npm run why -- "<query>"` | Debug retrieval pipeline — shows distances, tiers, and filter reasons |
+| `explain.ts` | `npm run explain -- "<prompt>"` | Dry-run recall for a prompt: shows concepts extracted, queries run, and which memories would inject |
+| `stats.ts` | `npm run stats` | Memory counts by all tiers, top accessed memories, prune and promote candidates |
 | `promote.ts` | `npm run promote` | Promote eligible short-term memories to long-term |
+| `prune.ts` | `npm run prune` | Promote provisionals at threshold; soft-delete stale ones; hard-delete old inactive rows |
 | `decay.ts` | `npm run decay` | Apply confidence decay to short-term memories |
+| `pin.ts` | `npm run pin -- --id N` | Pin or unpin a memory; list pins for current project |
 | `migrate.ts` | `npm run migrate` | Apply incremental schema migrations to the DB |
 | `purge.ts` | `npm run purge -- --id N` | Purge a memory by ID or semantic query |
 | `status.ts` | `npm run status` | Show system status (counts, DB size, daemon, env vars) |
@@ -153,26 +161,37 @@ npm run reindex
 ├── package.json
 ├── tsconfig.json
 ├── lib/
-│   ├── memory.ts         ← shared primitives (search, save, embed, chunk)
-│   └── migrate.ts        ← schema migration logic
+│   ├── memory.ts         ← shared primitives (search, save, embed, chunk, multiSearch)
+│   ├── migrate.ts        ← schema migration logic
+│   ├── utils.ts          ← pure functions (concepts, rerank, prune, classify)
+│   └── pin.ts            ← pin/unpin/listPinned DB operations
 ├── daemon/
 │   ├── server.ts         ← HTTP daemon (keeps model warm, port 7700)
 │   └── client.ts         ← daemon client with direct fallback
+├── mcp/
+│   ├── server.ts         ← MCP server (save_memory, pin_memory, explain_recall, …)
+│   └── handlers.ts       ← transport-free handler logic (testable)
 ├── scripts/
 │   ├── reindex.ts
 │   ├── search.ts
 │   ├── remember.ts
 │   ├── why.ts
+│   ├── explain.ts        ← dry-run recall: concepts, queries, would_inject
+│   ├── stats.ts          ← tier counts, top accessed, prune/promote candidates
 │   ├── promote.ts
+│   ├── prune.ts          ← promote provisionals + soft/hard-delete stale ones
+│   ├── pin.ts            ← pin/unpin CLI
 │   ├── decay.ts
 │   ├── migrate.ts
 │   ├── purge.ts
 │   └── status.ts
 ├── hooks/
-│   ├── on-prompt.ts      ← UserPromptSubmit: auto-search + inject
-│   └── on-stop.ts        ← Stop: auto-remember + save
+│   ├── on-session-start.ts  ← SessionStart: inject pinned memories
+│   ├── on-prompt.ts         ← UserPromptSubmit: multi-query search + inject
+│   └── on-stop.ts           ← Stop: auto-remember + save as provisional
 ├── tests/
-│   └── memory.test.ts    ← vitest unit tests
+│   ├── memory.test.ts    ← vitest unit tests (pure functions)
+│   └── integration.test.ts  ← DB integration tests
 └── memory/
     ├── raw/              ← markdown files (git-tracked, source of truth)
     └── memory.db         ← vector index (gitignored, regeneratable)
@@ -326,6 +345,10 @@ All tuneable behaviour can be overridden without editing source.
 | `ENGRAM_DECAY_RATE` | *(per-memory, default `0.02`)* | Global decay rate override applied to all short-term memories during `npm run decay`. Calibrated for daily runs. Use `0.005` for weekly. |
 | `ENGRAM_PORT` | `7700` | Port the daemon listens on. Must match between server and client. |
 | `ENGRAM_IDLE_MINUTES` | `120` | Minutes of inactivity before the daemon exits. Set to `0` to disable. |
+| `ENGRAM_DISABLE_CONCEPTS` | `0` | Set to `1` to skip concept extraction in `on-prompt.ts` and use single-query search only. |
+| `ENGRAM_USE_HAIKU_CONCEPTS` | `0` | Set to `1` to use Haiku for concept extraction instead of the heuristic extractor (~1s added per prompt). |
+| `ENGRAM_ENABLE_RERANK` | `0` | Set to `1` to re-rank top candidates via Haiku before injecting (~1-2s added per prompt). |
+| `ENGRAM_MAX_CONCEPTS` | `5` | Maximum number of concepts extracted per prompt in multi-query mode. |
 
 ---
 
@@ -384,10 +407,11 @@ Pinned memories are the closest thing Engram has to "always-on" memory — use t
 
 ### `hooks/on-prompt.ts` — auto-search (on every prompt)
 
-1. Embeds your prompt locally
-2. Searches memory — long-term globally, short-term filtered to the current project
-3. Injects matches as silent context before Claude sees your message
-4. Exits in milliseconds if nothing relevant found
+1. Extracts concepts from your prompt (backtick spans, PascalCase, camelCase, ALL_CAPS identifiers)
+2. Runs multi-query search: raw prompt + each concept → union results, keep lowest distance per memory
+3. Optionally re-ranks top candidates via Haiku (`ENGRAM_ENABLE_RERANK=1`)
+4. Injects matching memories (distance < 0.75) as silent context before Claude sees your message
+5. Exits in milliseconds if nothing relevant found — never blocks Claude
 
 ### `hooks/on-stop.ts` — auto-remember (after every response)
 

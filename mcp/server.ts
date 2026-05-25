@@ -20,10 +20,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { daemonSaveMemory } from '../daemon/client.ts';
-import { getTopicFromGit, getProjectScope } from '../lib/memory.ts';
+import { getTopicFromGit, getProjectScope, multiSearch, INJECTION_THRESHOLD } from '../lib/memory.ts';
 import { pin, unpin, listPinned, DB_PATH } from '../lib/pin.ts';
 import {
-  handleSaveMemory, handlePinMemory, handleUnpinMemory, handleListPinned,
+  handleSaveMemory, handlePinMemory, handleUnpinMemory, handleListPinned, handleExplainRecall,
 } from './handlers.ts';
 
 function nextPinOrder(): number {
@@ -122,6 +122,28 @@ async function main(): Promise<void> {
       });
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+        isError: !result.ok,
+      };
+    },
+  );
+
+  server.tool(
+    'explain_recall',
+    'Dry-run Engram recall for a given prompt: shows which concepts were extracted, ' +
+      'how many queries ran, and which memories would be injected (distance < threshold). ' +
+      'Use to debug why a memory did or did not surface in a conversation.',
+    {
+      prompt: z.string().min(1).describe('The prompt text to simulate recall for'),
+      scope: z.string().optional().describe('Project scope override (git remote URL)'),
+    },
+    async (args) => {
+      const result = await handleExplainRecall(args, {
+        multiSearch: (prompt, scope) => multiSearch(prompt, scope),
+        defaultScope: () => getProjectScope(),
+        injectionThreshold: INJECTION_THRESHOLD,
+      });
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
         isError: !result.ok,
       };
     },

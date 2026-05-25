@@ -257,6 +257,131 @@ export function heuristicExtract(text: string): HeuristicExtract | null {
   return { title, content, excerpt: signalSentence.slice(0, 200) };
 }
 
+// ─── Phase 5: associative recall ─────────────────────────────────────────────
+
+export const MAX_CONCEPTS = parseInt(process.env.ENGRAM_MAX_CONCEPTS ?? '5', 10);
+
+// Common sentence-starting or structural words to exclude from concept extraction
+const HEURISTIC_STOP_WORDS = new Set([
+  'The', 'This', 'That', 'These', 'Those', 'With', 'From', 'What', 'When',
+  'Where', 'How', 'Why', 'Which', 'For', 'But', 'And', 'Not', 'Have', 'Has',
+  'Can', 'Will', 'Would', 'Should', 'Could', 'May', 'Make', 'Also', 'Just',
+  'More', 'Some', 'Your', 'Their', 'Then', 'Than', 'Very', 'Each', 'Even',
+  'Well', 'Only', 'Both', 'Into', 'Over', 'After', 'Before', 'Through',
+  'Still', 'While', 'Since', 'Again', 'Here', 'There', 'Were', 'Been',
+  'Being', 'Does', 'Dont', 'Must', 'Such', 'Same', 'Like', 'Let', 'Get',
+]);
+
+/**
+ * Heuristic concept extractor — no API call, extracts technical terms from text.
+ * Captures: backtick spans, PascalCase/camelCase identifiers, ALL_CAPS abbreviations.
+ */
+export function extractConceptsHeuristic(text: string, max = MAX_CONCEPTS): string[] {
+  const concepts = new Set<string>();
+
+  // Backtick code spans (highest priority — explicitly quoted technical terms)
+  for (const m of text.matchAll(/`([^`\n]{2,40})`/g)) {
+    const t = m[1].trim();
+    if (t.length >= 2) concepts.add(t);
+  }
+
+  // PascalCase (e.g., PostgreSQL, WebSocket) and camelCase (e.g., useState, getTopicFromGit)
+  for (const m of text.matchAll(/\b([A-Z][a-zA-Z0-9]{2,}|[a-z]{2,}[A-Z][a-zA-Z0-9]*)\b/g)) {
+    if (!HEURISTIC_STOP_WORDS.has(m[1])) concepts.add(m[1]);
+  }
+
+  // ALL_CAPS abbreviations 3+ chars (e.g., JWT, SQL, API, HTTP)
+  for (const m of text.matchAll(/\b([A-Z]{3,})\b/g)) {
+    concepts.add(m[1]);
+  }
+
+  return [...concepts].slice(0, max);
+}
+
+/** Build the prompt to send to Haiku for concept extraction. */
+export function buildConceptsPrompt(promptText: string): string {
+  return `List 3-5 key technical concepts, technologies, or topics from this message. Return only a JSON array of short strings (1-3 words each). No explanation.
+
+Message: ${promptText.slice(0, 500)}
+
+JSON array only:`;
+}
+
+/** Parse Haiku concept-extraction output into a string array. */
+export function parseConceptsOutput(raw: string): string[] {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return [];
+
+  let inner = trimmed;
+  if (trimmed.startsWith('{')) {
+    try {
+      const wrapper = JSON.parse(trimmed);
+      if (typeof wrapper === 'object' && wrapper !== null && ('result' in wrapper || 'text' in wrapper)) {
+        inner = String(wrapper.result ?? wrapper.text ?? trimmed).trim();
+      }
+    } catch { /* not a wrapper */ }
+  }
+  if (!inner) return [];
+
+  try {
+    const parsed = JSON.parse(stripJsonFences(inner));
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      .slice(0, MAX_CONCEPTS);
+  } catch {
+    return [];
+  }
+}
+
+/** Build the re-ranking prompt sent to Haiku. */
+export function buildRerankPrompt(
+  query: string,
+  candidates: Array<{ id: number; title: string; chunk: string }>,
+): string {
+  const list = candidates
+    .map(c => `[id:${c.id}] ${c.title}: ${c.chunk.slice(0, 120).replace(/\n/g, ' ')}`)
+    .join('\n');
+  return `Rank these memory excerpts by relevance to the query. Return a JSON array of IDs in descending relevance order. Omit IDs that are not relevant.
+
+Query: ${query.slice(0, 200)}
+
+Candidates:
+${list}
+
+JSON array of IDs only (e.g. [3, 1, 5]):`;
+}
+
+/**
+ * Parse Haiku re-rank output into an ordered list of candidate IDs.
+ * Appends any unmentioned IDs at the end (preserves cosine-distance order for remainder).
+ * Falls back to original order on any parse error.
+ */
+export function parseRerankOutput(raw: string, candidateIds: number[]): number[] {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return candidateIds;
+
+  let inner = trimmed;
+  if (trimmed.startsWith('{')) {
+    try {
+      const wrapper = JSON.parse(trimmed);
+      if (typeof wrapper === 'object' && wrapper !== null && ('result' in wrapper || 'text' in wrapper)) {
+        inner = String(wrapper.result ?? wrapper.text ?? trimmed).trim();
+      }
+    } catch { /* not a wrapper */ }
+  }
+
+  try {
+    const parsed = JSON.parse(stripJsonFences(inner));
+    if (!Array.isArray(parsed)) return candidateIds;
+    const valid = parsed.filter((x): x is number => typeof x === 'number' && candidateIds.includes(x));
+    const seen = new Set(valid);
+    return [...valid, ...candidateIds.filter(id => !seen.has(id))];
+  } catch {
+    return candidateIds;
+  }
+}
+
 // ─── Phase 4: provisional pruning ────────────────────────────────────────────
 
 export const PRUNE_AGE_DAYS = 14;
