@@ -5,4 +5,5 @@ memory/raw/*
 !memory/raw/.gitkeep
 .DS_Store
 .claude/
+engram.config.json
 

@@ -441,10 +441,10 @@ describe('handleSaveMemory (Phase 2 — user scope)', () => {
 describe('findScopeGroup', () => {
   const config: EngramConfig = {
     scope_groups: {
-      payroller: [
-        'https://github.com/org/Payroller-Engine',
-        'https://github.com/org/Paybooker-Backend',
-        'https://github.com/org/Payroller-Infrastructure',
+      'my-product': [
+        'https://github.com/org/service-api',
+        'https://github.com/org/service-frontend',
+        'https://github.com/org/service-infra',
       ],
       engram: [
         'https://github.com/org/Engram',
@@ -453,12 +453,12 @@ describe('findScopeGroup', () => {
   };
 
   it('returns the group name for an exact URL match', () => {
-    expect(findScopeGroup('https://github.com/org/Payroller-Engine', config)).toBe('payroller');
+    expect(findScopeGroup('https://github.com/org/service-api', config)).toBe('my-product');
   });
 
   it('returns the group name for a URL that contains a config entry', () => {
     // git remote URLs often have .git suffix or different casing
-    expect(findScopeGroup('https://github.com/org/Paybooker-Backend.git', config)).toBe('payroller');
+    expect(findScopeGroup('https://github.com/org/service-frontend.git', config)).toBe('my-product');
   });
 
   it('returns the group when config URL is a substring of the scope', () => {

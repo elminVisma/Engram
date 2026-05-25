@@ -1,3 +1,9 @@
 {
-  "scope_groups": {}
+  "scope_groups": {
+    "payroller": [
+      "https://github.com/Enterprise-SE-HRM/Payroller-Engine.git",
+      "https://github.com/Enterprise-SE-HRM/Paybooker-Backend.git",
+      "https://github.com/Enterprise-SE-HRM/Payroller-Infrastructure.git"
+    ]
+  }
 }

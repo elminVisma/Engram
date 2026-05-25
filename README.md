@@ -441,6 +441,36 @@ Haiku is fast (~1-2s) and costs ~$0.0001 per call. Most responses get filtered b
 
 ---
 
+## Cross-Project Scope Groups
+
+Memories saved as `shared` tier surface in any project that belongs to the same scope group. Use this for patterns shared across a family of related repos (e.g. all repos in a monorepo ecosystem, or a backend + frontend + infra set).
+
+Scope groups are configured in `engram.config.json` at the root of the Engram directory. This file is gitignored — create it locally on each machine.
+
+```json
+{
+  "scope_groups": {
+    "my-product": [
+      "https://github.com/org/backend.git",
+      "https://github.com/org/frontend.git",
+      "https://github.com/org/infrastructure.git"
+    ]
+  }
+}
+```
+
+The key (`"my-product"`) is the group name. Each value is a git remote URL — the same string returned by `git remote get-url origin` in that repo.
+
+When you work in any of those repos and Engram runs a search, `shared`-tier memories whose `scope_group` matches the current repo's group are included in results. To save a memory as shared:
+
+```bash
+npm run remember -- --topic "auth" --title "JWT rotation pattern" --tier shared --file output.md
+```
+
+Or via MCP: `save_memory` with `tier: "shared"`.
+
+---
+
 ## Supersession
 
 When a new memory is semantically close to an existing one (cosine distance < 0.35), Engram supersedes the old memory rather than creating a duplicate. The old entry is marked inactive and linked to the new one. The `why` CLI shows superseded memories in red so you can see the full lineage.
