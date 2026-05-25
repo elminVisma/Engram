@@ -12,6 +12,7 @@ export interface SaveMemoryInput {
   topic?: string;
   excerpt?: string;
   tier?: MemoryTier;
+  scope?: 'user' | 'project';
 }
 
 export interface SaveMemoryResult {
@@ -36,13 +37,15 @@ export async function handleSaveMemory(
   if (!content) return { ok: false, error: 'content is required' };
 
   const topic = ((input.topic ?? deps.defaultTopic()) || '').trim() || 'general';
-  const tier: MemoryTier = input.tier ?? 'short';
+  const isUserScope = input.scope === 'user';
+  const tier: MemoryTier = isUserScope ? 'user' : (input.tier ?? 'short');
+  const projectScope = isUserScope ? null : deps.defaultScope();
 
   try {
     await deps.save(title, topic, content, {
       sourceExcerpt: input.excerpt,
       tier,
-      projectScope: deps.defaultScope(),
+      projectScope,
       tags: 'manual',
     });
     return { ok: true };

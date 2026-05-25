@@ -47,9 +47,10 @@ async function main(): Promise<void> {
       '---',
       '## Relevant context from Engram memory',
       '',
-      ...relevant.map(r =>
-        `**${r.title}** *(${r.topic})*\n${r.chunk.slice(0, 400)}${r.chunk.length > 400 ? '...' : ''}`
-      ),
+      ...relevant.map(r => {
+        const provisional = r.memory_tier === 'provisional' ? ' *(provisional)*' : '';
+        return `**${r.title}** *(${r.topic})*${provisional}\n${r.chunk.slice(0, 400)}${r.chunk.length > 400 ? '...' : ''}`;
+      }),
       '---',
       '',
     ];

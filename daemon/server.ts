@@ -11,7 +11,7 @@
 
 import http from 'node:http';
 import { pipeline } from '@huggingface/transformers';
-import { search, saveMemory, getProjectScope } from '../lib/memory.ts';
+import { search, saveMemory, getProjectScope, pruneProvisional, promoteProvisional, PROMOTE_ACCESS_THRESHOLD } from '../lib/memory.ts';
 import type { SaveOptions } from '../lib/memory.ts';
 
 const PORT = parseInt(process.env.ENGRAM_PORT ?? '7700', 10);
@@ -93,6 +93,22 @@ async function main(): Promise<void> {
   });
 
   resetIdleTimer(server);
+
+  // Daily prune + promote cycle (runs at idle, does not keep the process alive)
+  const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  setInterval(async () => {
+    try {
+      const promoted = promoteProvisional(undefined, PROMOTE_ACCESS_THRESHOLD);
+      const pruned = await pruneProvisional({ apply: true });
+      if (promoted > 0 || pruned.softDeleted > 0 || pruned.hardDeleted > 0) {
+        process.stderr.write(
+          `[Engram daemon] Daily prune: promoted=${promoted} soft=${pruned.softDeleted} hard=${pruned.hardDeleted}\n`
+        );
+      }
+    } catch (e) {
+      process.stderr.write(`[Engram daemon] Prune error: ${e}\n`);
+    }
+  }, PRUNE_INTERVAL_MS).unref();
 
   process.on('SIGTERM', () => server.close(() => process.exit(0)));
   process.on('SIGINT',  () => server.close(() => process.exit(0)));

@@ -91,20 +91,21 @@ function seed(
   args: {
     title: string;
     embedKey: string;
-    tier?: 'short' | 'long';
+    tier?: 'short' | 'long' | 'provisional';
     projectScope?: string | null;
     confidence?: number;
     decayRate?: number;
     accessCount?: number;
     isActive?: number;
+    createdAt?: number;
   },
 ): number {
   const v = serialize(Array.from(embedFor(args.embedKey)));
   const result = db.prepare(`
     INSERT INTO memories
       (path, title, tags, topic, chunk, memory_tier, project_scope,
-       confidence, decay_rate, access_count, is_active, embedding)
-    VALUES (?, ?, 'test', 'test', ?, ?, ?, ?, ?, ?, ?, ?)
+       confidence, decay_rate, access_count, is_active, created_at, embedding)
+    VALUES (?, ?, 'test', 'test', ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     `${args.title}.md`,
     args.title,
@@ -115,6 +116,7 @@ function seed(
     args.decayRate ?? 0.02,
     args.accessCount ?? 0,
     args.isActive ?? 1,
+    args.createdAt ?? Math.floor(Date.now() / 1000),
     v,
   );
   return Number(result.lastInsertRowid);
@@ -497,5 +499,134 @@ describe('parseClassifyOutput', () => {
     const { parseClassifyOutput } = await import('../lib/memory.ts');
     expect(parseClassifyOutput('{"title": "no flag"}')).toBeNull();
     expect(parseClassifyOutput('{"worth_saving": "yes"}')).toBeNull();
+  });
+});
+
+// ─── Phase 4: pruneProvisional ────────────────────────────────────────────────
+
+describe('pruneProvisional()', () => {
+  const DAY_S = 86400;
+
+  it('dry-run: returns eligible count without modifying the DB', async () => {
+    const { pruneProvisional } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    const now = Math.floor(Date.now() / 1000);
+    // Eligible: old, 0 accesses, low confidence
+    seed(db, { title: 'stale', embedKey: 'a', tier: 'provisional',
+      createdAt: now - 15 * DAY_S, accessCount: 0, confidence: 0.3 });
+    db.close();
+
+    const result = await pruneProvisional({ apply: false, dbPath });
+    expect(result.eligible).toBe(1);
+    expect(result.softDeleted).toBe(0);
+
+    // DB is unchanged
+    const db2 = openTestDb();
+    const row = db2.prepare('SELECT is_active FROM memories WHERE title = ?').get('stale') as { is_active: number };
+    db2.close();
+    expect(row.is_active).toBe(1);
+  });
+
+  it('apply: soft-deletes eligible provisional memories', async () => {
+    const { pruneProvisional } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    const now = Math.floor(Date.now() / 1000);
+    seed(db, { title: 'stale', embedKey: 'a', tier: 'provisional',
+      createdAt: now - 15 * DAY_S, accessCount: 0, confidence: 0.3 });
+    seed(db, { title: 'accessed', embedKey: 'b', tier: 'provisional',
+      createdAt: now - 15 * DAY_S, accessCount: 2, confidence: 0.3 });
+    db.close();
+
+    const result = await pruneProvisional({ apply: true, dbPath });
+    expect(result.softDeleted).toBe(1);
+
+    const db2 = openTestDb();
+    const stale = db2.prepare('SELECT is_active FROM memories WHERE title = ?').get('stale') as { is_active: number };
+    const accessed = db2.prepare('SELECT is_active FROM memories WHERE title = ?').get('accessed') as { is_active: number };
+    db2.close();
+    expect(stale.is_active).toBe(0);
+    expect(accessed.is_active).toBe(1);
+  });
+
+  it('apply: hard-deletes old soft-deleted provisional memories', async () => {
+    const { pruneProvisional } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    const now = Math.floor(Date.now() / 1000);
+    const id = seed(db, { title: 'ancient', embedKey: 'a', tier: 'provisional',
+      createdAt: now - 61 * DAY_S, accessCount: 0, confidence: 0.3, isActive: 0 });
+    db.close();
+
+    const result = await pruneProvisional({ apply: true, dbPath });
+    expect(result.hardDeleted).toBe(1);
+
+    const db2 = openTestDb();
+    const row = db2.prepare('SELECT id FROM memories WHERE id = ?').get(id);
+    db2.close();
+    expect(row).toBeUndefined();
+  });
+
+  it('does not touch non-provisional tiers', async () => {
+    const { pruneProvisional } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    const now = Math.floor(Date.now() / 1000);
+    seed(db, { title: 'short-mem', embedKey: 'a', tier: 'short',
+      createdAt: now - 15 * DAY_S, accessCount: 0, confidence: 0.3 });
+    db.close();
+
+    const result = await pruneProvisional({ apply: true, dbPath });
+    expect(result.softDeleted).toBe(0);
+    expect(result.eligible).toBe(0);
+  });
+});
+
+// ─── Phase 4: promoteProvisional ──────────────────────────────────────────────
+
+describe('promoteProvisional()', () => {
+  it('promotes provisional memories at threshold to short tier', async () => {
+    const { promoteProvisional } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    const id = seed(db, { title: 'ready', embedKey: 'a', tier: 'provisional', accessCount: 10 });
+    db.close();
+
+    const promoted = promoteProvisional(dbPath, 10);
+    expect(promoted).toBe(1);
+
+    const db2 = openTestDb();
+    const row = db2.prepare('SELECT memory_tier, previous_tier FROM memories WHERE id = ?').get(id) as
+      { memory_tier: string; previous_tier: string };
+    db2.close();
+    expect(row.memory_tier).toBe('short');
+    expect(row.previous_tier).toBe('provisional');
+  });
+
+  it('does not promote below threshold', async () => {
+    const { promoteProvisional } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    seed(db, { title: 'not-ready', embedKey: 'a', tier: 'provisional', accessCount: 3 });
+    db.close();
+
+    const promoted = promoteProvisional(dbPath, 10);
+    expect(promoted).toBe(0);
+
+    const db2 = openTestDb();
+    const row = db2.prepare('SELECT memory_tier FROM memories WHERE title = ?').get('not-ready') as { memory_tier: string };
+    db2.close();
+    expect(row.memory_tier).toBe('provisional');
+  });
+
+  it('does not promote non-provisional tiers', async () => {
+    const { promoteProvisional } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    seed(db, { title: 'short-high', embedKey: 'a', tier: 'short', accessCount: 99 });
+    db.close();
+
+    const promoted = promoteProvisional(dbPath, 1);
+    expect(promoted).toBe(0);
+  });
+
+  it('returns 0 when DB does not exist', async () => {
+    const { promoteProvisional } = await import('../lib/memory.ts');
+    const promoted = promoteProvisional(join(workDir, 'ghost.db'), 1);
+    expect(promoted).toBe(0);
   });
 });

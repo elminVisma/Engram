@@ -21,6 +21,7 @@
     "daemon:stop": "tsx scripts/daemon-stop.ts",
     "mcp": "tsx mcp/server.ts",
     "pin": "tsx scripts/pin.ts",
+    "prune": "tsx scripts/prune.ts",
     "test": "vitest run tests/",
     "smoke": "tsx tests/smoke.ts"
   },
@@ -34,6 +35,6 @@
     "@types/node": "^24.0.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
-    "vitest": "^1.0.0"
+    "vitest": "^3.2.4"
   }
 }

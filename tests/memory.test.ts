@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   chunkText,
   hasSignal,
@@ -7,11 +10,23 @@ import {
   cosineDistance,
   serialize,
   heuristicExtract,
+  buildClassifyPrompt,
+  parseClassifyOutput,
+  detectUserScope,
+  findScopeGroup,
+  loadEngramConfig,
+  isPruneable,
+  isHardDeletable,
+  PRUNE_AGE_DAYS,
+  HARD_DELETE_AGE_DAYS,
+  USER_TIER_PHRASES,
   SIGNAL_PHRASES,
   DUPLICATE_THRESHOLD,
   SUPERSESSION_THRESHOLD,
   INJECTION_THRESHOLD,
+  type EngramConfig,
 } from '../lib/utils.ts';
+import { handleSaveMemory } from '../mcp/handlers.ts';
 
 // ─── Task 19: chunkText tests ─────────────────────────────────────────────────
 
@@ -263,5 +278,335 @@ describe('heuristicExtract', () => {
 
   it('returns null for text shorter than 20 chars', () => {
     expect(heuristicExtract('too short')).toBeNull();
+  });
+});
+
+// ─── Phase 2: USER_TIER_PHRASES + detectUserScope ─────────────────────────────
+
+describe('USER_TIER_PHRASES', () => {
+  it('is a non-empty array of lowercase strings', () => {
+    expect(Array.isArray(USER_TIER_PHRASES)).toBe(true);
+    expect(USER_TIER_PHRASES.length).toBeGreaterThan(0);
+    for (const phrase of USER_TIER_PHRASES) {
+      expect(phrase).toBe(phrase.toLowerCase());
+    }
+  });
+});
+
+describe('detectUserScope', () => {
+  it('returns true for preference phrases', () => {
+    expect(detectUserScope('I prefer using tabs over spaces.')).toBe(true);
+    expect(detectUserScope('I always run tests before committing.')).toBe(true);
+    expect(detectUserScope('I never use var in TypeScript.')).toBe(true);
+  });
+
+  it('returns true for workflow language', () => {
+    expect(detectUserScope('My workflow is to write tests first.')).toBe(true);
+    expect(detectUserScope('I typically start by reading the failing test.')).toBe(true);
+  });
+
+  it('returns false for project-specific technical content', () => {
+    expect(detectUserScope('The migration file needs a DOWN step.')).toBe(false);
+    expect(detectUserScope('The bug was caused by a missing null check.')).toBe(false);
+  });
+
+  it('is case-insensitive', () => {
+    expect(detectUserScope('I PREFER functional components.')).toBe(true);
+  });
+
+  it('returns false for empty or short text', () => {
+    expect(detectUserScope('')).toBe(false);
+    expect(detectUserScope('hi')).toBe(false);
+  });
+});
+
+// ─── Phase 2: buildClassifyPrompt includes scope ──────────────────────────────
+
+describe('buildClassifyPrompt (Phase 2)', () => {
+  it('includes scope field in the JSON schema hint', () => {
+    const prompt = buildClassifyPrompt('The issue was that we forgot to flush.');
+    expect(prompt).toContain('"scope"');
+  });
+
+  it('mentions user, project scope options', () => {
+    const prompt = buildClassifyPrompt('I always prefer to write tests first.');
+    expect(prompt).toContain('user');
+    expect(prompt).toContain('project');
+  });
+});
+
+// ─── Phase 2: parseClassifyOutput handles scope field ─────────────────────────
+
+describe('parseClassifyOutput (Phase 2 — scope field)', () => {
+  it('parses scope: user from classifier output', () => {
+    const raw = JSON.stringify({
+      worth_saving: true,
+      title: 'User prefers TDD',
+      content: 'I always write tests first.',
+      excerpt: 'I always write tests first.',
+      scope: 'user',
+    });
+    const result = parseClassifyOutput(raw);
+    expect(result).not.toBeNull();
+    expect(result!.worth_saving).toBe(true);
+    expect(result!.scope).toBe('user');
+  });
+
+  it('parses scope: project from classifier output', () => {
+    const raw = JSON.stringify({
+      worth_saving: true,
+      title: 'Null check bug',
+      content: 'The bug was a missing null check.',
+      excerpt: 'The bug was a missing null check.',
+      scope: 'project',
+    });
+    const result = parseClassifyOutput(raw);
+    expect(result!.scope).toBe('project');
+  });
+
+  it('returns valid result when scope is absent (backward compat)', () => {
+    const raw = JSON.stringify({ worth_saving: false });
+    const result = parseClassifyOutput(raw);
+    expect(result).not.toBeNull();
+    expect(result!.worth_saving).toBe(false);
+    expect(result!.scope).toBeUndefined();
+  });
+});
+
+// ─── Phase 2: handleSaveMemory with scope='user' ──────────────────────────────
+
+describe('handleSaveMemory (Phase 2 — user scope)', () => {
+  it('saves with tier=user and projectScope=null when scope=user', async () => {
+    const calls: Array<{ title: string; topic: string; content: string; opts: unknown }> = [];
+
+    const deps = {
+      save: async (title: string, topic: string, content: string, opts: unknown) => {
+        calls.push({ title, topic, content, opts });
+      },
+      defaultTopic: () => 'engram',
+      defaultScope: () => 'https://github.com/org/repo',
+    };
+
+    await handleSaveMemory(
+      { title: 'User prefers TDD', content: 'I always write tests first.', scope: 'user' },
+      deps,
+    );
+
+    expect(calls).toHaveLength(1);
+    const saved = calls[0].opts as Record<string, unknown>;
+    expect(saved.tier).toBe('user');
+    expect(saved.projectScope).toBeNull();
+  });
+
+  it('uses defaultScope for project-scoped saves (scope omitted)', async () => {
+    const calls: Array<{ opts: unknown }> = [];
+
+    const deps = {
+      save: async (_t: string, _to: string, _c: string, opts: unknown) => {
+        calls.push({ opts });
+      },
+      defaultTopic: () => 'engram',
+      defaultScope: () => 'https://github.com/org/repo',
+    };
+
+    await handleSaveMemory(
+      { title: 'Bug fix', content: 'The null check was missing.' },
+      deps,
+    );
+
+    const saved = calls[0].opts as Record<string, unknown>;
+    expect(saved.projectScope).toBe('https://github.com/org/repo');
+  });
+
+  it('returns error when title is missing', async () => {
+    const deps = {
+      save: async () => {},
+      defaultTopic: () => 'engram',
+      defaultScope: () => null,
+    };
+    const result = await handleSaveMemory({ title: '', content: 'some content' }, deps);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/title/i);
+  });
+});
+
+// ─── Phase 3: findScopeGroup ──────────────────────────────────────────────────
+
+describe('findScopeGroup', () => {
+  const config: EngramConfig = {
+    scope_groups: {
+      payroller: [
+        'https://github.com/org/Payroller-Engine',
+        'https://github.com/org/Paybooker-Backend',
+        'https://github.com/org/Payroller-Infrastructure',
+      ],
+      engram: [
+        'https://github.com/org/Engram',
+      ],
+    },
+  };
+
+  it('returns the group name for an exact URL match', () => {
+    expect(findScopeGroup('https://github.com/org/Payroller-Engine', config)).toBe('payroller');
+  });
+
+  it('returns the group name for a URL that contains a config entry', () => {
+    // git remote URLs often have .git suffix or different casing
+    expect(findScopeGroup('https://github.com/org/Paybooker-Backend.git', config)).toBe('payroller');
+  });
+
+  it('returns the group when config URL is a substring of the scope', () => {
+    expect(findScopeGroup('git@github.com:org/Engram.git', config)).toBe('engram');
+  });
+
+  it('returns null when no group matches', () => {
+    expect(findScopeGroup('https://github.com/org/UnknownRepo', config)).toBeNull();
+  });
+
+  it('returns null for null scope', () => {
+    expect(findScopeGroup(null, config)).toBeNull();
+  });
+
+  it('returns null for empty scope', () => {
+    expect(findScopeGroup('', config)).toBeNull();
+  });
+
+  it('returns null when config has no scope_groups', () => {
+    expect(findScopeGroup('https://github.com/org/Engram', {})).toBeNull();
+  });
+});
+
+// ─── Phase 3: loadEngramConfig ────────────────────────────────────────────────
+
+describe('loadEngramConfig', () => {
+  let tmpDir: string;
+
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'engram-test-')); });
+  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it('loads a valid config file', () => {
+    const cfg = { scope_groups: { test: ['https://github.com/org/Test'] } };
+    writeFileSync(join(tmpDir, 'engram.config.json'), JSON.stringify(cfg), 'utf-8');
+    const result = loadEngramConfig(join(tmpDir, 'engram.config.json'));
+    expect(result.scope_groups?.test).toEqual(['https://github.com/org/Test']);
+  });
+
+  it('returns empty object when file does not exist', () => {
+    const result = loadEngramConfig(join(tmpDir, 'nonexistent.json'));
+    expect(result).toEqual({});
+  });
+
+  it('returns empty object for malformed JSON', () => {
+    writeFileSync(join(tmpDir, 'engram.config.json'), '{invalid json}', 'utf-8');
+    const result = loadEngramConfig(join(tmpDir, 'engram.config.json'));
+    expect(result).toEqual({});
+  });
+});
+
+// ─── Phase 4: isPruneable ─────────────────────────────────────────────────────
+
+describe('isPruneable', () => {
+  const DAY_S = 86400;
+  const now = Math.floor(Date.now() / 1000);
+
+  it('returns true for provisional memory older than PRUNE_AGE_DAYS with 0 accesses and low confidence', () => {
+    const m = {
+      memory_tier: 'provisional',
+      created_at: now - (PRUNE_AGE_DAYS + 1) * DAY_S,
+      access_count: 0,
+      confidence: 0.3,
+    };
+    expect(isPruneable(m, now)).toBe(true);
+  });
+
+  it('returns false if access_count > 0', () => {
+    const m = {
+      memory_tier: 'provisional',
+      created_at: now - (PRUNE_AGE_DAYS + 1) * DAY_S,
+      access_count: 1,
+      confidence: 0.3,
+    };
+    expect(isPruneable(m, now)).toBe(false);
+  });
+
+  it('returns false if confidence >= 0.5', () => {
+    const m = {
+      memory_tier: 'provisional',
+      created_at: now - (PRUNE_AGE_DAYS + 1) * DAY_S,
+      access_count: 0,
+      confidence: 0.5,
+    };
+    expect(isPruneable(m, now)).toBe(false);
+  });
+
+  it('returns false if newer than PRUNE_AGE_DAYS', () => {
+    const m = {
+      memory_tier: 'provisional',
+      created_at: now - (PRUNE_AGE_DAYS - 1) * DAY_S,
+      access_count: 0,
+      confidence: 0.3,
+    };
+    expect(isPruneable(m, now)).toBe(false);
+  });
+
+  it('returns false if memory_tier is not provisional', () => {
+    const m = {
+      memory_tier: 'short',
+      created_at: now - (PRUNE_AGE_DAYS + 1) * DAY_S,
+      access_count: 0,
+      confidence: 0.3,
+    };
+    expect(isPruneable(m, now)).toBe(false);
+  });
+
+  it('PRUNE_AGE_DAYS is 14', () => {
+    expect(PRUNE_AGE_DAYS).toBe(14);
+  });
+});
+
+// ─── Phase 4: isHardDeletable ─────────────────────────────────────────────────
+
+describe('isHardDeletable', () => {
+  const DAY_S = 86400;
+  const now = Math.floor(Date.now() / 1000);
+
+  it('returns true for soft-deleted provisional memory older than HARD_DELETE_AGE_DAYS', () => {
+    const m = {
+      is_active: 0,
+      memory_tier: 'provisional',
+      created_at: now - (HARD_DELETE_AGE_DAYS + 1) * DAY_S,
+    };
+    expect(isHardDeletable(m, now)).toBe(true);
+  });
+
+  it('returns false if is_active is 1', () => {
+    const m = {
+      is_active: 1,
+      memory_tier: 'provisional',
+      created_at: now - (HARD_DELETE_AGE_DAYS + 1) * DAY_S,
+    };
+    expect(isHardDeletable(m, now)).toBe(false);
+  });
+
+  it('returns false if newer than HARD_DELETE_AGE_DAYS', () => {
+    const m = {
+      is_active: 0,
+      memory_tier: 'provisional',
+      created_at: now - (HARD_DELETE_AGE_DAYS - 1) * DAY_S,
+    };
+    expect(isHardDeletable(m, now)).toBe(false);
+  });
+
+  it('returns false if memory_tier is not provisional', () => {
+    const m = {
+      is_active: 0,
+      memory_tier: 'short',
+      created_at: now - (HARD_DELETE_AGE_DAYS + 1) * DAY_S,
+    };
+    expect(isHardDeletable(m, now)).toBe(false);
+  });
+
+  it('HARD_DELETE_AGE_DAYS is 60', () => {
+    expect(HARD_DELETE_AGE_DAYS).toBe(60);
   });
 });

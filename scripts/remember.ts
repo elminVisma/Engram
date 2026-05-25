@@ -23,14 +23,15 @@ function parseArgs() {
     tags: get('--tags') ?? '',
     file: get('--file'),
     long: args.includes('--long'),
+    scope: get('--scope') as 'user' | 'project' | undefined,
   };
 }
 
 async function main() {
-  const { topic, title, tags, file, long } = parseArgs();
+  const { topic, title, tags, file, long, scope } = parseArgs();
 
   if (!topic || !title) {
-    console.error('Usage: tsx remember.ts --topic <topic> --title <title> [--tags <tags>] [--file <path>] [--long]');
+    console.error('Usage: tsx remember.ts --topic <topic> --title <title> [--tags <tags>] [--file <path>] [--long] [--scope user|project]');
     console.error('       Or pipe content via stdin.');
     process.exit(1);
   }
@@ -49,7 +50,12 @@ async function main() {
     process.exit(1);
   }
 
-  await saveMemory(title, topic, content, { tags, tier: long ? 'long' : 'short' });
+  const isUser = scope === 'user';
+  await saveMemory(title, topic, content, {
+    tags,
+    tier: isUser ? 'user' : (long ? 'long' : 'short'),
+    projectScope: isUser ? null : undefined,
+  });
   console.log('Saved and indexed.');
 }
 

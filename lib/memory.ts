@@ -14,9 +14,12 @@ import {
   PROMOTE_ACCESS_THRESHOLD, SIGNAL_PHRASES,
   serialize, cosineDistance, today, hasSignal,
   sanitizeTopic, getTopicFromGit, getProjectScope,
-  chunkText, stripJsonFences, decideSave, heuristicExtract,
+  chunkText, stripJsonFences, decideSave, heuristicExtract, detectUserScope,
+  findScopeGroup, loadEngramConfig, getScopeGroup,
   buildClassifyPrompt, parseClassifyOutput, runClassifier,
+  isPruneable, isHardDeletable,
   type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
+  type PrunableMemory, type HardDeletableMemory,
 } from './utils.ts';
 
 export {
@@ -24,9 +27,12 @@ export {
   PROMOTE_ACCESS_THRESHOLD, SIGNAL_PHRASES,
   serialize, cosineDistance, today, hasSignal,
   sanitizeTopic, getTopicFromGit, getProjectScope,
-  chunkText, stripJsonFences, decideSave, heuristicExtract,
+  chunkText, stripJsonFences, decideSave, heuristicExtract, detectUserScope,
+  findScopeGroup, loadEngramConfig, getScopeGroup,
   buildClassifyPrompt, parseClassifyOutput, runClassifier,
+  isPruneable, isHardDeletable, PRUNE_AGE_DAYS, HARD_DELETE_AGE_DAYS,
   type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
+  type PrunableMemory, type HardDeletableMemory,
 };
 
 const ENGRAM_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -58,6 +64,7 @@ export interface SaveOptions {
   tags?: string;
   tier?: MemoryTier;
   projectScope?: string | null;
+  scopeGroup?: string | null;
   /** Override DB path (test isolation). Defaults to DB_PATH. */
   dbPath?: string;
   /** Override markdown root (test isolation). Defaults to RAW_DIR. */
@@ -89,6 +96,7 @@ export async function search(
   if (!existsSync(dbPath)) return [];
 
   const scope = projectScope !== undefined ? projectScope : getProjectScope();
+  const scopeGroup = findScopeGroup(scope, loadEngramConfig());
 
   const extractor = await pipeline('feature-extraction', EMBED_MODEL, { dtype: 'fp32' });
   const out = await extractor(query, { pooling: 'mean', normalize: true });
@@ -106,6 +114,14 @@ export async function search(
   const longTerm = db.prepare(`${SELECT} AND memory_tier = 'long'`)
     .all() as EmbeddingRow[];
 
+  const userTier = db.prepare(`${SELECT} AND memory_tier = 'user'`)
+    .all() as EmbeddingRow[];
+
+  const sharedTier = scopeGroup
+    ? (db.prepare(`${SELECT} AND memory_tier = 'shared' AND scope_group = ?`)
+        .all(scopeGroup) as EmbeddingRow[])
+    : [];
+
   const shortTerm = scope !== null
     ? (db.prepare(`${SELECT} AND memory_tier = 'short' AND (project_scope = ? OR project_scope IS NULL)`)
         .all(scope) as EmbeddingRow[])
@@ -115,7 +131,7 @@ export async function search(
   // Deduplicate by id, compute distances, sort
   const seen = new Set<number>();
   const scored: Array<EmbeddingRow & { distance: number }> = [];
-  for (const r of [...longTerm, ...shortTerm]) {
+  for (const r of [...longTerm, ...userTier, ...sharedTier, ...shortTerm]) {
     if (!seen.has(r.id)) {
       seen.add(r.id);
       scored.push({ ...r, distance: cosineDistance(queryEmbedding, r.embedding) });
@@ -242,12 +258,13 @@ export async function saveMemory(
       const result = db.prepare(`
         INSERT INTO memories
           (path, title, tags, topic, chunk, session_id, source_excerpt,
-           memory_tier, project_scope, confidence, decay_rate, supersedes, is_active, file_hash, embedding)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0.02, ?, 1, NULL, ?)
+           memory_tier, project_scope, scope_group, confidence, decay_rate, supersedes, is_active, file_hash, embedding)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0.02, ?, 1, NULL, ?)
       `).run(
         filepath, title, mergedOpts.tags ?? 'auto', topic, content,
         mergedOpts.sessionId ?? null, mergedOpts.sourceExcerpt ?? null,
-        mergedOpts.tier, mergedOpts.projectScope, supersededId, embedding
+        mergedOpts.tier, mergedOpts.projectScope, mergedOpts.scopeGroup ?? null,
+        supersededId, embedding
       );
 
       const newId = Number(result.lastInsertRowid);
@@ -301,6 +318,98 @@ ${content}
   return `${safeTopic}/${filename}`;
 }
 
+// ─── Phase 4: prune + promote provisional ────────────────────────────────────
+
+export interface PruneResult {
+  eligible: number;
+  softDeleted: number;
+  hardDeleted: number;
+}
+
+/**
+ * Soft-delete provisional memories that are stale (>14d, 0 accesses, confidence<0.5).
+ * Hard-delete provisional memories that were soft-deleted and are >60d old.
+ * Pass apply=true to commit; dry-run by default.
+ */
+export async function pruneProvisional(
+  opts: { apply?: boolean; dbPath?: string } = {},
+): Promise<PruneResult> {
+  const dbPath = opts.dbPath ?? DB_PATH;
+  if (!existsSync(dbPath)) return { eligible: 0, softDeleted: 0, hardDeleted: 0 };
+
+  const db = openDb(dbPath);
+  const now = Math.floor(Date.now() / 1000);
+
+  const softCandidates = db.prepare(
+    `SELECT id, memory_tier, created_at, access_count, confidence
+     FROM memories WHERE is_active = 1 AND memory_tier = 'provisional'`
+  ).all() as Array<PrunableMemory & { id: number }>;
+
+  const hardCandidates = db.prepare(
+    `SELECT id, is_active, memory_tier, created_at
+     FROM memories WHERE is_active = 0 AND memory_tier = 'provisional'`
+  ).all() as Array<HardDeletableMemory & { id: number }>;
+
+  const toSoft = softCandidates.filter(m => isPruneable(m, now));
+  const toHard = hardCandidates.filter(m => isHardDeletable(m, now));
+
+  if (opts.apply && (toSoft.length > 0 || toHard.length > 0)) {
+    db.exec('BEGIN');
+    try {
+      for (const m of toSoft) db.prepare('UPDATE memories SET is_active = 0 WHERE id = ?').run(m.id);
+      for (const m of toHard) db.prepare('DELETE FROM memories WHERE id = ?').run(m.id);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      db.close();
+      throw e;
+    }
+  }
+
+  db.close();
+  return {
+    eligible: toSoft.length,
+    softDeleted: opts.apply ? toSoft.length : 0,
+    hardDeleted: opts.apply ? toHard.length : 0,
+  };
+}
+
+/**
+ * Promote provisional memories that have reached the access threshold to short tier.
+ * Returns the count of memories promoted.
+ */
+export function promoteProvisional(
+  dbPath: string = DB_PATH,
+  threshold: number = PROMOTE_ACCESS_THRESHOLD,
+): number {
+  if (!existsSync(dbPath)) return 0;
+  const db = openDb(dbPath);
+  try {
+    const candidates = db.prepare(
+      `SELECT id FROM memories
+       WHERE is_active = 1 AND memory_tier = 'provisional' AND access_count >= ?`
+    ).all(threshold) as Array<{ id: number }>;
+
+    if (candidates.length === 0) return 0;
+
+    db.exec('BEGIN');
+    try {
+      for (const m of candidates) {
+        db.prepare(
+          `UPDATE memories SET memory_tier = 'short', previous_tier = 'provisional' WHERE id = ?`
+        ).run(m.id);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    return candidates.length;
+  } finally {
+    db.close();
+  }
+}
+
 // ─── autoRemember pipeline ───────────────────────────────────────────────────
 // The pure pieces — buildClassifyPrompt / parseClassifyOutput / runClassifier
 // — live in lib/utils.ts so they can be tested without loading transformers.
@@ -314,8 +423,12 @@ async function fallbackHeuristic(
 ): Promise<void> {
   const extracted = heuristicExtract(responseText);
   if (!extracted) return;
+  const isUser = detectUserScope(responseText);
   await saveMemory(extracted.title, topic ?? getTopicFromGit(), extracted.content, {
-    sessionId, sourceExcerpt: extracted.excerpt, tier: 'short', projectScope: scope,
+    sessionId,
+    sourceExcerpt: extracted.excerpt,
+    tier: isUser ? 'user' : 'provisional',
+    projectScope: isUser ? null : scope,
   });
 }
 
@@ -345,10 +458,14 @@ export async function autoRemember(
   const decision = parseClassifyOutput(raw);
   if (!decision || !decision.worth_saving || !decision.title || !decision.content) return;
 
+  const isUser = decision.scope === 'user' || detectUserScope(decision.content);
+  const isShared = !isUser && decision.scope === 'shared';
+  const scopeGroup = isShared ? getScopeGroup() : null;
   await saveMemory(decision.title, topic ?? getTopicFromGit(), decision.content, {
     sessionId,
     sourceExcerpt: decision.excerpt,
-    tier: 'short',
-    projectScope: scope,
+    tier: isUser ? 'user' : (isShared ? 'shared' : 'provisional'),
+    projectScope: isUser ? null : scope,
+    scopeGroup: isShared ? scopeGroup : null,
   });
 }

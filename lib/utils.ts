@@ -4,13 +4,79 @@
  */
 
 import { execSync, spawnSync } from 'child_process';
-import { basename } from 'path';
+import { readFileSync } from 'fs';
+import { basename, join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
 export const DUPLICATE_THRESHOLD = 0.15;
 export const SUPERSESSION_THRESHOLD = 0.35;
 export const INJECTION_THRESHOLD = 0.75;
 
 export const PROMOTE_ACCESS_THRESHOLD = parseInt(process.env.ENGRAM_PROMOTE_THRESHOLD ?? '10', 10);
+
+export const USER_TIER_PHRASES = [
+  'i prefer', 'i always', 'i never', 'i typically', 'i usually', 'i tend to',
+  'my preference', 'my workflow', 'my approach', 'i like to', 'i dislike',
+  'i find that', 'for me ', 'personally i', 'i generally',
+];
+
+export function detectUserScope(text: string): boolean {
+  if (!text || text.length < 5) return false;
+  const lower = text.toLowerCase();
+  return USER_TIER_PHRASES.some(p => lower.includes(p));
+}
+
+// ─── Phase 3: scope groups + config ──────────────────────────────────────────
+
+export interface EngramConfig {
+  scope_groups?: Record<string, string[]>;
+}
+
+const DEFAULT_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'engram.config.json');
+
+export function loadEngramConfig(configPath: string = DEFAULT_CONFIG_PATH): EngramConfig {
+  try {
+    return JSON.parse(readFileSync(configPath, 'utf-8')) as EngramConfig;
+  } catch {
+    return {};
+  }
+}
+
+/** Strip protocol/host/suffix noise so https:// and git@ URLs compare equal. */
+function normalizeRepoPath(url: string): string {
+  return url
+    .replace(/\.git$/, '')
+    .replace(/^git@[^:]+:/, '')
+    .replace(/^https?:\/\/[^/]+\//, '')
+    .toLowerCase();
+}
+
+/**
+ * Pure lookup: given a git remote URL and a parsed config, return the group
+ * name whose URL list contains (or is contained in) the scope string.
+ * Normalises both sides so https:// and git@ variants match.
+ */
+export function findScopeGroup(scope: string | null, config: EngramConfig): string | null {
+  if (!scope || !config.scope_groups) return null;
+  const ns = normalizeRepoPath(scope);
+  for (const [group, urls] of Object.entries(config.scope_groups)) {
+    if (urls.some(u => {
+      const nu = normalizeRepoPath(u);
+      return ns === nu || ns.includes(nu) || nu.includes(ns);
+    })) return group;
+  }
+  return null;
+}
+
+/**
+ * Impure: reads the config file and resolves the scope group for the current
+ * working directory's git remote.
+ */
+export function getScopeGroup(cwd?: string, configPath?: string): string | null {
+  const scope = getProjectScope(cwd);
+  if (!scope) return null;
+  return findScopeGroup(scope, loadEngramConfig(configPath));
+}
 
 export const SIGNAL_PHRASES = [
   // Discovery
@@ -191,6 +257,40 @@ export function heuristicExtract(text: string): HeuristicExtract | null {
   return { title, content, excerpt: signalSentence.slice(0, 200) };
 }
 
+// ─── Phase 4: provisional pruning ────────────────────────────────────────────
+
+export const PRUNE_AGE_DAYS = 14;
+export const HARD_DELETE_AGE_DAYS = 60;
+
+export interface PrunableMemory {
+  memory_tier: string;
+  created_at: number;
+  access_count: number;
+  confidence: number;
+}
+
+/** True if a provisional memory is old enough, unaccessed, and low-confidence to soft-delete. */
+export function isPruneable(memory: PrunableMemory, nowUnix: number): boolean {
+  if (memory.memory_tier !== 'provisional') return false;
+  if (nowUnix - memory.created_at < PRUNE_AGE_DAYS * 86400) return false;
+  if (memory.access_count > 0) return false;
+  if (memory.confidence >= 0.5) return false;
+  return true;
+}
+
+export interface HardDeletableMemory {
+  is_active: number;
+  memory_tier: string;
+  created_at: number;
+}
+
+/** True if a soft-deleted provisional memory is old enough to hard-delete. */
+export function isHardDeletable(memory: HardDeletableMemory, nowUnix: number): boolean {
+  if (memory.is_active !== 0) return false;
+  if (memory.memory_tier !== 'provisional') return false;
+  return nowUnix - memory.created_at >= HARD_DELETE_AGE_DAYS * 86400;
+}
+
 // Task 22: decision logic extracted for testability
 export type SaveDecision = 'skip' | 'new' | { supersede: number };
 export function decideSave(candidates: Array<{ id: number; distance: number }>): SaveDecision {
@@ -205,11 +305,14 @@ export function decideSave(candidates: Array<{ id: number; distance: number }>):
 
 const CLASSIFY_MODEL = process.env.ENGRAM_MODEL ?? 'claude-haiku-4-5-20251001';
 
+export type ClassifyScope = 'user' | 'project' | 'shared' | 'none';
+
 export interface ClassifyDecision {
   worth_saving: boolean;
   title?: string;
   content?: string;
   excerpt?: string;
+  scope?: ClassifyScope;
 }
 
 /** Build the prompt sent to the classifier. Pure. */
@@ -219,11 +322,17 @@ export function buildClassifyPrompt(responseText: string): string {
 SAVE: non-obvious discoveries, bug root causes, patterns, constraints, gotchas, non-obvious decisions.
 SKIP: routine code generation, obvious explanations, status updates, conversational filler.
 
+Also classify scope:
+- "user": user preference/habit/workflow ("I prefer X", "I always Y", "my approach is Z")
+- "project": fact specific to this codebase or task
+- "shared": applies across related projects (cross-project pattern)
+- "none": not worth saving
+
 Response:
 ${responseText.slice(0, 2000)}
 
 JSON only — no other text:
-{"worth_saving": true, "title": "under 8 words", "content": "1-3 sentences", "excerpt": "verbatim sentence that triggered this"}
+{"worth_saving": true, "title": "under 8 words", "content": "1-3 sentences", "excerpt": "verbatim sentence that triggered this", "scope": "user|project|shared|none"}
 or
 {"worth_saving": false}`;
 }

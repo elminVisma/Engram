@@ -54,6 +54,8 @@ async function main(): Promise<void> {
       excerpt: z.string().optional().describe('Verbatim sentence that triggered this save'),
       tier: z.enum(['short', 'long', 'pinned', 'user', 'shared', 'provisional']).optional()
         .describe('Memory tier. Default: short. Use "pinned" to inject at SessionStart, "user" for user-level facts that surface in every project.'),
+      scope: z.enum(['user', 'project']).optional()
+        .describe('Scope override. "user" saves with tier=user and no project binding — surfaces in every project. Overrides tier when set.'),
     },
     async (args) => {
       const result = await handleSaveMemory(args, {
