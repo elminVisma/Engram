@@ -120,8 +120,8 @@ export function listPinned(
          ORDER BY pin_order ASC, id ASC`;
 
     const rows = scope === null
-      ? db.prepare(sql).all() as PinnedMemory[]
-      : db.prepare(sql).all(scope) as PinnedMemory[];
+      ? db.prepare(sql).all() as unknown as PinnedMemory[]
+      : db.prepare(sql).all(scope) as unknown as PinnedMemory[];
 
     return rows;
   } finally {

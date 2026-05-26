@@ -633,6 +633,50 @@ describe('multiSearch()', () => {
   });
 });
 
+// ─── Recall quality: recordRecallHit ─────────────────────────────────────────
+
+describe('recordRecallHit()', () => {
+  it('increments recall_hit for matched ids', async () => {
+    const { recordRecallHit } = await import('../lib/recall.ts');
+    const db = openTestDb();
+    const id = seed(db, { title: 'hit-me', embedKey: 'jwt-base', tier: 'short' });
+    db.close();
+
+    recordRecallHit([id], dbPath);
+
+    const db2 = new DatabaseSync(dbPath);
+    const row = db2.prepare('SELECT recall_hit FROM memories WHERE id = ?').get(id) as { recall_hit: number };
+    db2.close();
+    expect(row.recall_hit).toBe(1);
+  });
+
+  it('increments by 1 per call — multiple calls accumulate', async () => {
+    const { recordRecallHit } = await import('../lib/recall.ts');
+    const db = openTestDb();
+    const id = seed(db, { title: 'multi-hit', embedKey: 'jwt-base', tier: 'short' });
+    db.close();
+
+    recordRecallHit([id], dbPath);
+    recordRecallHit([id], dbPath);
+    recordRecallHit([id], dbPath);
+
+    const db2 = new DatabaseSync(dbPath);
+    const row = db2.prepare('SELECT recall_hit FROM memories WHERE id = ?').get(id) as { recall_hit: number };
+    db2.close();
+    expect(row.recall_hit).toBe(3);
+  });
+
+  it('is a no-op for an empty id list', async () => {
+    const { recordRecallHit } = await import('../lib/recall.ts');
+    expect(() => recordRecallHit([], dbPath)).not.toThrow();
+  });
+
+  it('is a no-op when DB does not exist', async () => {
+    const { recordRecallHit } = await import('../lib/recall.ts');
+    expect(() => recordRecallHit([1], join(workDir, 'ghost.db'))).not.toThrow();
+  });
+});
+
 // ─── Phase 4: promoteProvisional ──────────────────────────────────────────────
 
 describe('promoteProvisional()', () => {

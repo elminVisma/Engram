@@ -1,9 +1,9 @@
-name: test
+name: CI
 
 on: [push, pull_request]
 
 jobs:
-  test:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -12,4 +12,5 @@ jobs:
           node-version: '24'
           cache: 'npm'
       - run: npm ci
+      - run: npx tsc --noEmit
       - run: npm test

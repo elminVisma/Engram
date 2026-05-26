@@ -374,6 +374,44 @@ describe('Migration: ensureSchema handles old schemas', () => {
     expect(row.previous_tier).toBeNull();
   });
 
+  it('v5 DB (missing recall_hit) migrates cleanly to v6', () => {
+    const db = new DatabaseSync(dbPath);
+    db.exec(`CREATE TABLE schema_version (version INTEGER NOT NULL DEFAULT 0)`);
+    db.prepare('INSERT INTO schema_version (version) VALUES (5)').run();
+    db.exec(`
+      CREATE TABLE memories (
+        id              INTEGER PRIMARY KEY,
+        path            TEXT NOT NULL,
+        title           TEXT,
+        chunk           TEXT NOT NULL,
+        memory_tier     TEXT DEFAULT 'short',
+        project_scope   TEXT,
+        confidence      REAL DEFAULT 1.0,
+        decay_rate      REAL DEFAULT 0.02,
+        access_count    INTEGER DEFAULT 0,
+        is_active       INTEGER DEFAULT 1,
+        created_at      INTEGER DEFAULT (unixepoch()),
+        embedding       BLOB,
+        pin_order       INTEGER,
+        scope_group     TEXT,
+        previous_tier   TEXT
+      )
+    `);
+    db.prepare(`INSERT INTO memories (path, title, chunk) VALUES (?, ?, ?)`).run('v5.md', 'V5 memory', 'content');
+    db.close();
+
+    const db2 = new DatabaseSync(dbPath);
+    ensureSchema(db2);
+
+    const vRow = db2.prepare('SELECT version FROM schema_version').get() as { version: number };
+    expect(vRow.version).toBe(CURRENT_VERSION);
+
+    const row = db2.prepare(`SELECT recall_hit FROM memories WHERE title = ?`).get('V5 memory') as
+      { recall_hit: number };
+    db2.close();
+    expect(row.recall_hit).toBe(0);
+  });
+
   it('ensureSchema is idempotent — running twice does not corrupt data', () => {
     const db = new DatabaseSync(dbPath);
     ensureSchema(db);

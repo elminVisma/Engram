@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import { homedir } from 'os';
 import { autoRemember, getTopicFromGit, getProjectScope } from '../lib/memory.ts';
+import { getPendingRecall, detectRecallHits, recordRecallHit, clearPendingRecall } from '../lib/recall.ts';
 
 function getLastAssistantMessage(transcriptPath: string): string {
   try {
@@ -83,6 +84,20 @@ async function main(): Promise<void> {
   const projectScope = getProjectScope(gitCwd);
 
   await autoRemember(lastResponse, topic, sessionId, projectScope);
+
+  // Measure recall quality: check if Claude referenced any injected memories
+  if (sessionId) {
+    try {
+      const pending = getPendingRecall(sessionId);
+      if (pending.length > 0) {
+        if (lastResponse) {
+          const hitIds = detectRecallHits(lastResponse, pending);
+          if (hitIds.length > 0) recordRecallHit(hitIds);
+        }
+        clearPendingRecall(sessionId);
+      }
+    } catch { /* silent */ }
+  }
 }
 
 main().catch(() => {});

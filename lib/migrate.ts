@@ -6,7 +6,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const CURRENT_VERSION = 5;
+export const CURRENT_VERSION = 6;
 
 // Each migration: [fromVersion, toVersion, sql]
 export const MIGRATIONS: [number, number, string][] = [
@@ -49,6 +49,12 @@ export const MIGRATIONS: [number, number, string][] = [
     ALTER TABLE memories ADD COLUMN previous_tier TEXT;
     CREATE INDEX IF NOT EXISTS idx_memories_tier_scope
       ON memories (memory_tier, project_scope);
+  `],
+  // Recall quality signal: counts how many times this memory was referenced
+  // in a Claude response after being injected. Used by scripts/stats.ts to
+  // surface injection effectiveness.
+  [5, 6, `
+    ALTER TABLE memories ADD COLUMN recall_hit INTEGER NOT NULL DEFAULT 0;
   `],
 ];
 

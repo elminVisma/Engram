@@ -24,6 +24,7 @@ import {
 } from '../lib/memory.ts';
 import type { SearchResult } from '../lib/memory.ts';
 import { daemonSearch } from '../daemon/client.ts';
+import { savePendingRecall } from '../lib/recall.ts';
 
 const CANDIDATE_LIMIT = 20;
 const TOP_K = 5;
@@ -36,10 +37,12 @@ async function main(): Promise<void> {
 
   let prompt = '';
   let sessionCwd = '';
+  let sessionId = '';
   try {
     const input = JSON.parse(raw);
     prompt = input.prompt ?? '';
     sessionCwd = input.cwd ?? '';
+    sessionId = input.session_id ?? '';
   } catch { return; }
   if (prompt.length < 20) return;
 
@@ -61,11 +64,13 @@ async function main(): Promise<void> {
       }
     }
 
-    // ── Multi-query search ───────────────────────────────────────────────────
+    // ── Multi-query search (parallel) ────────────────────────────────────────
     const queries = [prompt, ...concepts];
+    const allResults = await Promise.all(
+      queries.map(q => daemonSearch(q, CANDIDATE_LIMIT, scope)),
+    );
     const byId = new Map<number, SearchResult>();
-    for (const q of queries) {
-      const results = await daemonSearch(q, CANDIDATE_LIMIT, scope);
+    for (const results of allResults) {
       for (const r of results) {
         const existing = byId.get(r.id);
         if (!existing || existing.distance > r.distance) byId.set(r.id, r);
@@ -95,6 +100,13 @@ async function main(): Promise<void> {
 
     const queryNote = concepts.length > 0 ? ` (${queries.length} queries)` : '';
     process.stderr.write(`[Engram] Injecting ${relevant.length} relevant memor${relevant.length > 1 ? 'ies' : 'y'}${queryNote}\n`);
+
+    // Track which memories were injected so on-stop.ts can measure recall quality
+    if (sessionId) {
+      try {
+        savePendingRecall(sessionId, relevant.map(r => ({ id: r.id, title: r.title, chunk: r.chunk })));
+      } catch { /* never block Claude */ }
+    }
 
     const lines = [
       '---',

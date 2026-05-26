@@ -107,6 +107,38 @@ async function main() {
     console.log(`  ${YELLOW}${promoteCount}${RESET} ${DIM}— run: npm run prune -- --apply (promotes first)${RESET}`);
   }
 
+  // ── Recall quality ────────────────────────────────────────────────────────
+  const recallStats = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN recall_hit > 0 THEN 1 ELSE 0 END) AS hit_count,
+      SUM(recall_hit) AS total_hits
+    FROM memories WHERE is_active = 1
+  `).get() as { total: number; hit_count: number; total_hits: number };
+
+  const hitRate = recallStats.total > 0
+    ? ((recallStats.hit_count / recallStats.total) * 100).toFixed(1)
+    : '0.0';
+
+  console.log(`\n${BOLD}Recall quality${RESET} (memories referenced after injection)`);
+  console.log(`  hit rate        ${recallStats.hit_count} / ${recallStats.total} active memories (${hitRate}%)`);
+  console.log(`  total hit events  ${recallStats.total_hits ?? 0}`);
+
+  if (recallStats.total_hits > 0) {
+    const topRecalled = db.prepare(`
+      SELECT title, topic, memory_tier, recall_hit
+      FROM memories
+      WHERE is_active = 1 AND recall_hit > 0
+      ORDER BY recall_hit DESC
+      LIMIT ?
+    `).all(TOP_N) as Array<{ title: string; topic: string; memory_tier: string; recall_hit: number }>;
+
+    console.log(`\n${BOLD}Top ${TOP_N} most recalled${RESET}`);
+    for (const r of topRecalled) {
+      console.log(`  ${BOLD}${r.title}${RESET} ${DIM}(${r.topic} / ${r.memory_tier})${RESET}  ×${r.recall_hit}`);
+    }
+  }
+
   db.close();
   console.log();
 }

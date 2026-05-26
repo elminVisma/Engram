@@ -17,7 +17,7 @@ import {
   chunkText, stripJsonFences, decideSave, heuristicExtract, detectUserScope,
   findScopeGroup, loadEngramConfig, getScopeGroup,
   buildClassifyPrompt, parseClassifyOutput, runClassifier,
-  isPruneable, isHardDeletable,
+  isPruneable, isHardDeletable, PRUNE_AGE_DAYS, HARD_DELETE_AGE_DAYS,
   extractConceptsHeuristic, buildConceptsPrompt, parseConceptsOutput,
   buildRerankPrompt, parseRerankOutput, MAX_CONCEPTS,
   type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
@@ -382,12 +382,12 @@ export async function pruneProvisional(
   const softCandidates = db.prepare(
     `SELECT id, memory_tier, created_at, access_count, confidence
      FROM memories WHERE is_active = 1 AND memory_tier = 'provisional'`
-  ).all() as Array<PrunableMemory & { id: number }>;
+  ).all() as unknown as Array<PrunableMemory & { id: number }>;
 
   const hardCandidates = db.prepare(
     `SELECT id, is_active, memory_tier, created_at
      FROM memories WHERE is_active = 0 AND memory_tier = 'provisional'`
-  ).all() as Array<HardDeletableMemory & { id: number }>;
+  ).all() as unknown as Array<HardDeletableMemory & { id: number }>;
 
   const toSoft = softCandidates.filter(m => isPruneable(m, now));
   const toHard = hardCandidates.filter(m => isHardDeletable(m, now));

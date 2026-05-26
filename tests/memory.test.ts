@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { detectRecallHits, savePendingRecall, getPendingRecall, clearPendingRecall } from '../lib/recall.ts';
+import type { InjectedMemory } from '../lib/recall.ts';
 import {
   chunkText,
   hasSignal,
@@ -801,5 +803,94 @@ describe('parseRerankOutput', () => {
 
   it('falls back to original order when parsed value is not an array', () => {
     expect(parseRerankOutput('{"ids": [1,2]}', ids)).toEqual(ids);
+  });
+});
+
+// ─── Recall quality: detectRecallHits ────────────────────────────────────────
+
+describe('detectRecallHits', () => {
+  const injected: InjectedMemory[] = [
+    { id: 1, title: 'JWT auth flow', chunk: 'The JWT token is stored in a cookie and validated on each request.' },
+    { id: 2, title: 'WebSocket setup', chunk: 'Use socket.io for real-time bidirectional communication.' },
+    { id: 3, title: 'ab', chunk: 'Too short title.' },
+  ];
+
+  it('returns id when response contains the title (case-insensitive)', () => {
+    const hits = detectRecallHits('I followed the JWT auth flow pattern here.', injected);
+    expect(hits).toContain(1);
+    expect(hits).not.toContain(2);
+  });
+
+  it('title match is case-insensitive', () => {
+    const hits = detectRecallHits('The JWT AUTH FLOW is used here.', injected);
+    expect(hits).toContain(1);
+  });
+
+  it('returns id when response contains the chunk snippet', () => {
+    const hits = detectRecallHits('Use socket.io for real-time bidirectional communication in this project.', injected);
+    expect(hits).toContain(2);
+  });
+
+  it('returns [] when no memory is referenced', () => {
+    const hits = detectRecallHits('This response is about something completely different.', injected);
+    expect(hits).toEqual([]);
+  });
+
+  it('ignores titles shorter than 4 characters', () => {
+    const hits = detectRecallHits('ab ab ab too short title.', injected);
+    expect(hits).not.toContain(3);
+  });
+
+  it('returns [] for empty response', () => {
+    const hits = detectRecallHits('', injected);
+    expect(hits).toEqual([]);
+  });
+
+  it('returns [] for empty injected list', () => {
+    const hits = detectRecallHits('JWT auth flow is referenced here.', []);
+    expect(hits).toEqual([]);
+  });
+
+  it('can match multiple memories in one response', () => {
+    const hits = detectRecallHits(
+      'I used the JWT auth flow and also WebSocket setup from the memory.',
+      injected,
+    );
+    expect(hits).toContain(1);
+    expect(hits).toContain(2);
+  });
+});
+
+// ─── Recall quality: pending recall I/O ──────────────────────────────────────
+
+describe('pending recall I/O', () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'engram-recall-')); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it('savePendingRecall + getPendingRecall round-trips memories', () => {
+    const memories: InjectedMemory[] = [
+      { id: 1, title: 'JWT auth flow', chunk: 'The JWT token...' },
+      { id: 2, title: 'WebSocket setup', chunk: 'Use socket.io...' },
+    ];
+    savePendingRecall('sess-abc', memories, dir);
+    const loaded = getPendingRecall('sess-abc', dir);
+    expect(loaded).toEqual(memories);
+  });
+
+  it('getPendingRecall returns [] for missing session', () => {
+    const loaded = getPendingRecall('no-such-session', dir);
+    expect(loaded).toEqual([]);
+  });
+
+  it('clearPendingRecall removes the file', () => {
+    savePendingRecall('sess-del', [{ id: 99, title: 'X', chunk: 'Y' }], dir);
+    clearPendingRecall('sess-del', dir);
+    expect(getPendingRecall('sess-del', dir)).toEqual([]);
+    expect(existsSync(join(dir, 'sess-del.json'))).toBe(false);
+  });
+
+  it('clearPendingRecall is a no-op for a session that was never saved', () => {
+    expect(() => clearPendingRecall('ghost', dir)).not.toThrow();
   });
 });
