@@ -17,18 +17,74 @@ Engram fills that gap.
 ## How It Works
 
 ```
+Session opens
+  → on-session-start.ts loads pinned memories → injected into the system prompt
+
 You type a prompt
-  → on-prompt.ts searches memory → relevant context injected silently
+  → on-prompt.ts searches memory → relevant context prepended to your message
   → Claude responds
   → on-stop.ts checks response for learnings → saves automatically
 ```
 
-Fully automatic in both directions. You just work.
+Fully automatic in every direction. You just work.
 
 - **Markdown** is the source of truth — human-readable, git-tracked, portable forever
 - **node:sqlite** is the storage layer — built into Node 24 LTS, a single `.db` file, no server process, no native compilation
 - **all-MiniLM-L6-v2** generates embeddings locally via ONNX — works fully offline after first download
 - **Pure JS cosine similarity** replaces sqlite-vec KNN — fast enough at Engram scale, zero native deps
+
+---
+
+## How Claude Uses It
+
+This is the part that surprises people: **Claude never retrieves memory. It never decides to "look something up."** Engram's hooks inject memory as plain text *before* Claude sees the turn — from Claude's perspective it's indistinguishable from anything else already in the prompt.
+
+There are exactly two moments where memory reaches Claude:
+
+**1. Session start — pinned memories.** When a session opens, `on-session-start.ts` writes the pinned set into the **system prompt**. It's in context for the whole session, before you type anything. No search, no threshold — pinned memories always load (for the matching scope).
+
+**2. Every prompt — everything else.** When you submit a prompt, `on-prompt.ts` runs a semantic search *before* Claude reads your message, and prepends the matches as a block:
+
+```
+## Relevant context from Engram memory
+**JWT refresh token rotation** *(auth)*
+Always rotate the refresh token on every use...
+---
+```
+
+That block arrives attached to your message. By the time Claude generates a response, it's already there.
+
+What this means in practice:
+
+- **It's passive injection, not active retrieval.** The hook does the search; Claude doesn't call a tool or query the DB.
+- **Relevance is decided by the hook, not by Claude.** The `distance < 0.75` threshold and the top-5 cap (`on-prompt.ts`) determine what's offered. Claude only ever sees what survived that filter.
+- **Claude has no awareness of the rest of the DB.** If a relevant memory scores `distance >= 0.75` on a given prompt, Claude never sees it and has no idea it exists. The pinned set is the only memory guaranteed to be present every turn.
+- **Injected ≠ obeyed.** A memory in context is *weighed* during generation if relevant, ignored if not — exactly like any other sentence in the prompt. Memories surfaced this way are background context, not instructions, and reflect what was true when written (verify a path/flag still exists before acting on it).
+
+In short: Engram is **retrieval-augmented continuity** — it stacks the deck of what's in context — not a memory Claude can introspect or search on demand.
+
+### Memories aren't added to sessions — sessions pull them
+
+A common misconception: that saving a memory "attaches" it to relevant sessions. It doesn't. A memory is saved **once**, as a single row, tagged with *where it's allowed to surface*. Future sessions then pull whatever matches — nothing is ever pushed into a session.
+
+**At save time**, Engram records the memory's *reach*, not its destination:
+
+| Field | Determines |
+|---|---|
+| `memory_tier` | how broad the reach is (user/long = everywhere, shared = repo group, short/provisional = one project) |
+| `project_scope` | which project (the git remote of the repo you were in) |
+| `scope_group` | which family of repos (shared tier only) |
+| `embedding` | semantic relevance |
+| `session_id` | provenance only — **not** used to route retrieval |
+
+**At read time**, each session decides what's relevant *to it* via two filters, both required:
+
+1. **Scope match** — does this session's project/group qualify to see this tier?
+2. **Semantic match** — is `distance < 0.75` for *this* prompt?
+
+A `short` memory saved in `repo-A` is invisible in a session opened in `repo-B` — wrong scope, no matter how semantically relevant. A global `long` memory still won't appear unless the current prompt is close enough. `session_id` is stored as a breadcrumb of origin only; it plays no role in which future sessions surface the memory.
+
+So: **save = tag the memory with its reach; read = each session pulls what matches its scope and its current prompt.**
 
 ---
 
@@ -55,7 +111,7 @@ Response saved → provisional (scoped to project)
 Provisionals never accessed → pruned after 14 days (npm run prune)
 ```
 
-Pinned memories are the "always-on" tier. They inject at SessionStart via `hooks/on-session-start.ts`, before the first prompt — ideal for stable facts the model should never forget.
+Pinned memories are the "always-on" tier. They inject at SessionStart via `hooks/on-session-start.ts`, before the first prompt — ideal for stable facts the model should never forget. Unlike every other tier, **pinning is always manual** (`npm run pin -- --id N` or the `pin_memory` MCP tool) — nothing is auto-pinned, because every pin is permanent context cost on every session.
 
 ---
 
