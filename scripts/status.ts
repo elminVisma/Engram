@@ -9,7 +9,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { statSync, existsSync } from 'fs';
 import http from 'node:http';
-import { DB_PATH } from '../lib/memory.ts';
+import { DB_PATH, tierCounts, ALL_TIERS } from '../lib/memory.ts';
 
 const PORT = parseInt(process.env.ENGRAM_PORT ?? '7700', 10);
 
@@ -75,14 +75,16 @@ async function main() {
     try {
       const db = new DatabaseSync(DB_PATH, { readOnly: true });
 
-      const shortCount = (db.prepare(`SELECT COUNT(*) as n FROM memories WHERE is_active = 1 AND memory_tier = 'short'`).get() as { n: number }).n;
-      const longCount  = (db.prepare(`SELECT COUNT(*) as n FROM memories WHERE is_active = 1 AND memory_tier = 'long'`).get() as { n: number }).n;
-      const inactive   = (db.prepare(`SELECT COUNT(*) as n FROM memories WHERE is_active = 0`).get() as { n: number }).n;
+      const counts     = tierCounts(DB_PATH);
       const lastSave   = (db.prepare(`SELECT MAX(created_at) as ts FROM memories`).get() as { ts: number | null }).ts;
       const lastSearch = (db.prepare(`SELECT MAX(last_accessed_at) as ts FROM memories`).get() as { ts: number | null }).ts;
 
-      console.log(`  Active:      ${GREEN}${shortCount + longCount}${RESET} (${shortCount} short-term, ${longCount} long-term)`);
-      console.log(`  Inactive:    ${GREY}${inactive}${RESET} (superseded + purged)`);
+      const breakdown = ALL_TIERS
+        .filter(t => counts.active[t] > 0)
+        .map(t => `${counts.active[t]} ${t}`)
+        .join(', ');
+      console.log(`  Active:      ${GREEN}${counts.totalActive}${RESET}${breakdown ? ` (${breakdown})` : ''}`);
+      console.log(`  Inactive:    ${GREY}${counts.totalInactive}${RESET} (superseded + purged)`);
       console.log(`  Last save:   ${formatUnixTime(lastSave)}`);
       console.log(`  Last search: ${formatUnixTime(lastSearch)}`);
 

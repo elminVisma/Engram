@@ -449,6 +449,56 @@ export function promoteProvisional(
   }
 }
 
+// ─── Status reporting ────────────────────────────────────────────────────────
+
+/** Every tier name, in display order. */
+export const ALL_TIERS: MemoryTier[] = [
+  'pinned', 'user', 'shared', 'long', 'short', 'provisional',
+];
+
+export interface TierCounts {
+  active: Record<MemoryTier, number>;
+  inactive: Record<MemoryTier, number>;
+  totalActive: number;
+  totalInactive: number;
+}
+
+function zeroCounts(): Record<MemoryTier, number> {
+  return Object.fromEntries(ALL_TIERS.map(t => [t, 0])) as Record<MemoryTier, number>;
+}
+
+/**
+ * Count active and inactive memories broken down by tier. Used by `npm run
+ * status` so the totals cover every tier — not just short/long.
+ */
+export function tierCounts(dbPath: string = DB_PATH): TierCounts {
+  const counts: TierCounts = {
+    active: zeroCounts(),
+    inactive: zeroCounts(),
+    totalActive: 0,
+    totalInactive: 0,
+  };
+  if (!existsSync(dbPath)) return counts;
+
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const rows = db.prepare(
+      `SELECT memory_tier AS tier, is_active AS active, COUNT(*) AS n
+       FROM memories GROUP BY memory_tier, is_active`
+    ).all() as Array<{ tier: string; active: number; n: number }>;
+
+    for (const r of rows) {
+      const bucket = r.active ? counts.active : counts.inactive;
+      if (r.tier in bucket) bucket[r.tier as MemoryTier] += r.n;
+      if (r.active) counts.totalActive += r.n;
+      else counts.totalInactive += r.n;
+    }
+  } finally {
+    db.close();
+  }
+  return counts;
+}
+
 // ─── autoRemember pipeline ───────────────────────────────────────────────────
 // The pure pieces — buildClassifyPrompt / parseClassifyOutput / runClassifier
 // — live in lib/utils.ts so they can be tested without loading transformers.

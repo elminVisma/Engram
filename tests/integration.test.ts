@@ -91,7 +91,7 @@ function seed(
   args: {
     title: string;
     embedKey: string;
-    tier?: 'short' | 'long' | 'provisional';
+    tier?: 'short' | 'long' | 'provisional' | 'pinned' | 'user' | 'shared';
     projectScope?: string | null;
     confidence?: number;
     decayRate?: number;
@@ -674,6 +674,56 @@ describe('recordRecallHit()', () => {
   it('is a no-op when DB does not exist', async () => {
     const { recordRecallHit } = await import('../lib/recall.ts');
     expect(() => recordRecallHit([1], join(workDir, 'ghost.db'))).not.toThrow();
+  });
+});
+
+// ─── tierCounts() (status reporting) ──────────────────────────────────────────
+
+describe('tierCounts()', () => {
+  it('counts active memories across every tier, not just short/long', async () => {
+    const { tierCounts } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    seed(db, { title: 'p',  embedKey: 'a', tier: 'pinned' });
+    seed(db, { title: 's1', embedKey: 'b', tier: 'shared' });
+    seed(db, { title: 's2', embedKey: 'c', tier: 'shared' });
+    seed(db, { title: 'u',  embedKey: 'd', tier: 'user' });
+    seed(db, { title: 'sh', embedKey: 'e', tier: 'short' });
+    seed(db, { title: 'pr', embedKey: 'f', tier: 'provisional' });
+    db.close();
+
+    const counts = tierCounts(dbPath);
+    expect(counts.active.pinned).toBe(1);
+    expect(counts.active.shared).toBe(2);
+    expect(counts.active.user).toBe(1);
+    expect(counts.active.short).toBe(1);
+    expect(counts.active.provisional).toBe(1);
+    expect(counts.active.long).toBe(0);
+    expect(counts.totalActive).toBe(6);
+  });
+
+  it('counts inactive memories across every tier', async () => {
+    const { tierCounts } = await import('../lib/memory.ts');
+    const db = openTestDb();
+    seed(db, { title: 'a', embedKey: 'a', tier: 'short',       isActive: 0 });
+    seed(db, { title: 'b', embedKey: 'b', tier: 'provisional', isActive: 0 });
+    seed(db, { title: 'c', embedKey: 'c', tier: 'long',        isActive: 0 });
+    seed(db, { title: 'd', embedKey: 'd', tier: 'short',       isActive: 1 });
+    db.close();
+
+    const counts = tierCounts(dbPath);
+    expect(counts.totalInactive).toBe(3);
+    expect(counts.inactive.short).toBe(1);
+    expect(counts.inactive.provisional).toBe(1);
+    expect(counts.inactive.long).toBe(1);
+    expect(counts.totalActive).toBe(1);
+  });
+
+  it('returns all-zero counts when DB does not exist', async () => {
+    const { tierCounts } = await import('../lib/memory.ts');
+    const counts = tierCounts(join(workDir, 'ghost.db'));
+    expect(counts.totalActive).toBe(0);
+    expect(counts.totalInactive).toBe(0);
+    expect(counts.active.short).toBe(0);
   });
 });
 
