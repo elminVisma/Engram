@@ -6,7 +6,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const CURRENT_VERSION = 6;
+export const CURRENT_VERSION = 7;
 
 // Each migration: [fromVersion, toVersion, sql]
 export const MIGRATIONS: [number, number, string][] = [
@@ -55,6 +55,13 @@ export const MIGRATIONS: [number, number, string][] = [
   // surface injection effectiveness.
   [5, 6, `
     ALTER TABLE memories ADD COLUMN recall_hit INTEGER NOT NULL DEFAULT 0;
+  `],
+  // Consolidation: merging related high-value memories into a denser survivor.
+  // archived_at marks when a memory was consolidated away (distinct from prune's
+  // is_active=0); consolidated_into points at the surviving memory's id.
+  [6, 7, `
+    ALTER TABLE memories ADD COLUMN archived_at      INTEGER;
+    ALTER TABLE memories ADD COLUMN consolidated_into INTEGER;
   `],
 ];
 

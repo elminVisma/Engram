@@ -30,6 +30,8 @@ export function detectUserScope(text: string): boolean {
 
 export interface EngramConfig {
   scope_groups?: Record<string, string[]>;
+  /** Per-tier item caps. A cap of 0 disables capacity checking for that tier. */
+  caps?: Partial<Record<MemoryTier, number>>;
 }
 
 const DEFAULT_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'engram.config.json');
@@ -76,6 +78,84 @@ export function getScopeGroup(cwd?: string, configPath?: string): string | null 
   const scope = getProjectScope(cwd);
   if (!scope) return null;
   return findScopeGroup(scope, loadEngramConfig(configPath));
+}
+
+// ─── Capacity caps (flag growing tiers for consolidation) ────────────────────
+
+/** Fraction of a tier's cap at which it is flagged for consolidation. */
+export const CAPACITY_THRESHOLD = parseFloat(process.env.ENGRAM_CAPACITY_THRESHOLD ?? '0.8');
+
+/**
+ * Default per-tier item caps. `pinned` mirrors the SessionStart injection limit
+ * (ENGRAM_PIN_LIMIT, ~10). The growing tiers (short/provisional) get the largest
+ * caps because they accrete the fastest. A cap of 0 disables the check.
+ */
+export const DEFAULT_TIER_CAPS: Record<MemoryTier, number> = {
+  pinned: 10,
+  user: 60,
+  shared: 80,
+  long: 200,
+  short: 400,
+  provisional: 200,
+};
+
+const ALL_TIER_NAMES: MemoryTier[] = ['pinned', 'user', 'shared', 'long', 'short', 'provisional'];
+
+/**
+ * Merge default caps with config overrides and per-tier env overrides
+ * (`ENGRAM_CAP_<TIER>`, e.g. ENGRAM_CAP_PROVISIONAL=50). Pure given its inputs.
+ */
+export function resolveTierCaps(
+  config: EngramConfig = {},
+  env: NodeJS.ProcessEnv = process.env,
+): Record<MemoryTier, number> {
+  const resolved = { ...DEFAULT_TIER_CAPS };
+  for (const tier of ALL_TIER_NAMES) {
+    const fromConfig = config.caps?.[tier];
+    if (typeof fromConfig === 'number' && Number.isFinite(fromConfig)) resolved[tier] = fromConfig;
+    const fromEnv = env[`ENGRAM_CAP_${tier.toUpperCase()}`];
+    if (fromEnv !== undefined && fromEnv !== '' && Number.isFinite(Number(fromEnv))) {
+      resolved[tier] = Number(fromEnv);
+    }
+  }
+  return resolved;
+}
+
+export interface TierCapacity {
+  tier: MemoryTier;
+  count: number;
+  cap: number;
+  ratio: number;
+  atThreshold: boolean;
+  over: boolean;
+}
+
+/**
+ * Pure capacity check. Given active counts per tier and resolved caps, returns
+ * one entry per tier with a positive cap, flagging those at/over the threshold.
+ * Tiers with cap <= 0 are omitted (disabled).
+ */
+export function checkCapacity(
+  counts: Record<MemoryTier, number>,
+  caps: Partial<Record<MemoryTier, number>>,
+  threshold: number = CAPACITY_THRESHOLD,
+): TierCapacity[] {
+  const out: TierCapacity[] = [];
+  for (const tier of ALL_TIER_NAMES) {
+    const cap = caps[tier] ?? 0;
+    if (cap <= 0) continue;
+    const count = counts[tier] ?? 0;
+    const ratio = count / cap;
+    out.push({
+      tier,
+      count,
+      cap,
+      ratio,
+      atThreshold: count >= cap * threshold,
+      over: count > cap,
+    });
+  }
+  return out;
 }
 
 export const SIGNAL_PHRASES = [
@@ -489,6 +569,59 @@ export function parseClassifyOutput(raw: string): ClassifyDecision | null {
   const p = parsed as ClassifyDecision;
   if (typeof p.worth_saving !== 'boolean') return null;
   return p;
+}
+
+// ─── Consolidation helpers (merge related memories into a denser survivor) ────
+
+/** Extract and slugify `[[wiki links]]` from text. */
+export function extractLinks(text: string): string[] {
+  const out: string[] = [];
+  for (const m of (text ?? '').matchAll(/\[\[([^\]]+)\]\]/g)) {
+    const slug = m[1].trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (slug && !out.includes(slug)) out.push(slug);
+  }
+  return out;
+}
+
+export interface ConsolidateMember { title: string; chunk: string; }
+export interface ConsolidateMerge { title: string; content: string; }
+
+/** Build the prompt that asks the model to merge a cluster into one dense memory. */
+export function buildConsolidatePrompt(members: ConsolidateMember[]): string {
+  const list = members
+    .map((m, i) => `[${i + 1}] ${m.title}\n${m.chunk.trim()}`)
+    .join('\n\n');
+  return `Merge these related memories into ONE denser memory. Preserve EVERY actionable fact, decision, gotcha, and [[link]] from all of them — drop only redundancy and filler. Do not invent anything not present in the inputs.
+
+Memories:
+${list}
+
+JSON only — no other text:
+{"title": "under 8 words", "content": "the merged memory, every distinct fact kept"}`;
+}
+
+/** Parse the consolidation model output into {title, content}, or null. */
+export function parseConsolidateOutput(raw: string): ConsolidateMerge | null {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return null;
+
+  let inner = trimmed;
+  if (trimmed.startsWith('{')) {
+    try {
+      const wrapper = JSON.parse(trimmed);
+      if (typeof wrapper === 'object' && wrapper !== null && ('result' in wrapper || 'text' in wrapper)) {
+        inner = String(wrapper.result ?? wrapper.text ?? trimmed).trim();
+      }
+    } catch { /* not a wrapper */ }
+  }
+
+  let parsed: unknown;
+  try { parsed = JSON.parse(stripJsonFences(inner)); } catch { return null; }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const p = parsed as Partial<ConsolidateMerge>;
+  if (typeof p.title !== 'string' || typeof p.content !== 'string') return null;
+  if (!p.title.trim() || !p.content.trim()) return null;
+  return { title: p.title.trim(), content: p.content.trim() };
 }
 
 /**

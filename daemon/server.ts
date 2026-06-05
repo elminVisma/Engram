@@ -11,7 +11,10 @@
 
 import http from 'node:http';
 import { pipeline } from '@huggingface/transformers';
-import { search, saveMemory, getProjectScope, pruneProvisional, promoteProvisional, PROMOTE_ACCESS_THRESHOLD } from '../lib/memory.ts';
+import {
+  search, saveMemory, getProjectScope, pruneProvisional, promoteProvisional, PROMOTE_ACCESS_THRESHOLD,
+  tierCounts, checkCapacity, resolveTierCaps, loadEngramConfig,
+} from '../lib/memory.ts';
 import type { SaveOptions } from '../lib/memory.ts';
 
 const PORT = parseInt(process.env.ENGRAM_PORT ?? '7700', 10);
@@ -104,6 +107,30 @@ async function main(): Promise<void> {
         process.stderr.write(
           `[Engram daemon] Daily prune: promoted=${promoted} soft=${pruned.softDeleted} hard=${pruned.hardDeleted}\n`
         );
+      }
+
+      // Capacity-triggered consolidation: flag growing tiers that crossed the
+      // threshold, then merge them into denser survivors. Each pass snapshots
+      // first (reversible). Set ENGRAM_AUTO_CONSOLIDATE=0 to flag-only.
+      const caps = resolveTierCaps(loadEngramConfig());
+      const flagged = checkCapacity(tierCounts().active, caps).filter(t => t.atThreshold);
+      if (flagged.length > 0) {
+        process.stderr.write(
+          `[Engram daemon] Tiers over capacity threshold: ${
+            flagged.map(t => `${t.tier}=${t.count}/${t.cap}`).join(' ')
+          }\n`
+        );
+        if (process.env.ENGRAM_AUTO_CONSOLIDATE !== '0') {
+          const { consolidateTier } = await import('../lib/consolidate.ts');
+          for (const t of flagged) {
+            const r = await consolidateTier({ tier: t.tier, apply: true });
+            if (r.merged > 0) {
+              process.stderr.write(
+                `[Engram daemon] Consolidated ${t.tier}: merged=${r.merged} archived=${r.archived} snapshot=${r.snapshotId}\n`
+              );
+            }
+          }
+        }
       }
     } catch (e) {
       process.stderr.write(`[Engram daemon] Prune error: ${e}\n`);

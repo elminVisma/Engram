@@ -22,8 +22,12 @@ import { z } from 'zod';
 import { daemonSaveMemory } from '../daemon/client.ts';
 import { getTopicFromGit, getProjectScope, multiSearch, INJECTION_THRESHOLD } from '../lib/memory.ts';
 import { pin, unpin, listPinned, DB_PATH } from '../lib/pin.ts';
+import { snapshot, listSnapshots, restore } from '../lib/snapshot.ts';
+import { consolidateTier, listArchived, unarchive } from '../lib/consolidate.ts';
 import {
   handleSaveMemory, handlePinMemory, handleUnpinMemory, handleListPinned, handleExplainRecall,
+  handleListSnapshots, handleRestoreSnapshot,
+  handleConsolidate, handleListArchived, handleUnarchive,
 } from './handlers.ts';
 
 function nextPinOrder(): number {
@@ -144,6 +148,92 @@ async function main(): Promise<void> {
       });
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        isError: !result.ok,
+      };
+    },
+  );
+
+  server.tool(
+    'consolidate',
+    'Merge related high-value memories in a tier into denser survivors. NOT pruning — ' +
+      'nothing low-value is removed; related memories are compressed so a growing tier stays ' +
+      'dense. Dry-run by default (reports clusters, writes nothing). Pass apply=true to take a ' +
+      'snapshot and write survivors + archive originals (reversible via restore_snapshot).',
+    {
+      tier: z.enum(['short', 'long', 'user', 'shared', 'provisional'])
+        .describe('Which tier to consolidate. Pinned and manually-saved memories are never touched.'),
+      scope: z.string().optional().describe('Limit to one project scope (git remote URL)'),
+      apply: z.boolean().optional().describe('If true, commit the merge. Default false (dry-run).'),
+    },
+    async (args) => {
+      const result = await handleConsolidate(args, {
+        consolidate: (tier, scope, apply) => consolidateTier({ tier, projectScope: scope, apply }),
+      });
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        isError: !result.ok,
+      };
+    },
+  );
+
+  server.tool(
+    'list_archived',
+    'List memories that were archived by consolidation (newest first), each pointing at the ' +
+      'survivor it was merged into. Use to audit a consolidation pass or find a memory to recover.',
+    {},
+    async () => {
+      const result = await handleListArchived({ listArchived: () => listArchived() });
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        isError: !result.ok,
+      };
+    },
+  );
+
+  server.tool(
+    'unarchive',
+    'Reactivate a single memory that was archived by consolidation, undoing the merge for that ' +
+      'one original. The survivor is left in place.',
+    {
+      id: z.number().int().positive().describe('Memory id to reactivate (from list_archived)'),
+    },
+    async (args) => {
+      const result = await handleUnarchive(args, { unarchive: (id) => unarchive(id) });
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+        isError: !result.ok,
+      };
+    },
+  );
+
+  server.tool(
+    'list_snapshots',
+    'List Engram DB snapshots, newest first. Snapshots are taken automatically before ' +
+      'consolidation/prune passes so those operations are reversible.',
+    {},
+    async () => {
+      const result = await handleListSnapshots({ listSnapshots: () => listSnapshots() });
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        isError: !result.ok,
+      };
+    },
+  );
+
+  server.tool(
+    'restore_snapshot',
+    'Restore the Engram DB from a snapshot id, undoing an automated maintenance pass. ' +
+      'Takes a safety snapshot of the current state first, so a wrong restore is itself reversible.',
+    {
+      id: z.string().min(1).describe('Snapshot id to restore (from list_snapshots)'),
+    },
+    async (args) => {
+      const result = await handleRestoreSnapshot(args, {
+        restore: (id) => restore(id),
+        snapshot: () => snapshot(),
+      });
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(result) }],
         isError: !result.ok,
       };
     },
