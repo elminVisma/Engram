@@ -9,7 +9,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import { statSync, existsSync } from 'fs';
 import http from 'node:http';
-import { DB_PATH, tierCounts, ALL_TIERS } from '../lib/memory.ts';
+import {
+  DB_PATH, tierCounts, ALL_TIERS,
+  checkCapacity, resolveTierCaps, loadEngramConfig,
+} from '../lib/memory.ts';
+import { listSnapshots } from '../lib/snapshot.ts';
+import { listArchived } from '../lib/consolidate.ts';
 
 const PORT = parseInt(process.env.ENGRAM_PORT ?? '7700', 10);
 
@@ -83,12 +88,36 @@ async function main() {
         .filter(t => counts.active[t] > 0)
         .map(t => `${counts.active[t]} ${t}`)
         .join(', ');
+      const archivedCount = (db.prepare(
+        `SELECT COUNT(*) AS n FROM memories WHERE archived_at IS NOT NULL`
+      ).get() as { n: number }).n;
+
       console.log(`  Active:      ${GREEN}${counts.totalActive}${RESET}${breakdown ? ` (${breakdown})` : ''}`);
-      console.log(`  Inactive:    ${GREY}${counts.totalInactive}${RESET} (superseded + purged)`);
+      console.log(`  Inactive:    ${GREY}${counts.totalInactive}${RESET} (superseded, purged, consolidated)`);
       console.log(`  Last save:   ${formatUnixTime(lastSave)}`);
       console.log(`  Last search: ${formatUnixTime(lastSearch)}`);
 
       db.close();
+
+      // ── Maintenance ─────────────────────────────────────
+      console.log(`\n${BOLD}Maintenance${RESET}`);
+
+      const caps = resolveTierCaps(loadEngramConfig());
+      const flagged = checkCapacity(counts.active, caps).filter(t => t.atThreshold);
+      if (flagged.length > 0) {
+        console.log(`  Capacity:    ${YELLOW}${flagged.map(t => `${t.tier} ${t.count}/${t.cap}`).join(', ')}${RESET} ${DIM}(will consolidate at idle)${RESET}`);
+      } else {
+        console.log(`  Capacity:    ${GREEN}all tiers under threshold${RESET}`);
+      }
+
+      console.log(`  Archived:    ${archivedCount > 0 ? CYAN + archivedCount + RESET : GREY + '0' + RESET}${archivedCount > 0 ? ` ${DIM}(consolidated away — npm run consolidate -- --list-archived)${RESET}` : ''}`);
+
+      const snaps = listSnapshots();
+      if (snaps.length > 0) {
+        console.log(`  Snapshots:   ${GREEN}${snaps.length}${RESET} ${DIM}(latest ${snaps[0].id} · ${new Date(snaps[0].createdAt).toLocaleString()})${RESET}`);
+      } else {
+        console.log(`  Snapshots:   ${GREY}none${RESET}`);
+      }
     } catch (e) {
       console.log(`  ${RED}Error reading DB: ${e}${RESET}`);
     }
@@ -114,6 +143,8 @@ async function main() {
   console.log(`  ENGRAM_MODEL:         ${engramModel ? CYAN + engramModel : GREY + 'not set (using default)'}${RESET}`);
   const engramPort = process.env.ENGRAM_PORT;
   console.log(`  ENGRAM_PORT:          ${engramPort ? CYAN + engramPort : GREY + `not set (using ${PORT})`}${RESET}`);
+  const autoConsolidate = process.env.ENGRAM_AUTO_CONSOLIDATE === '0';
+  console.log(`  ENGRAM_AUTO_CONSOLIDATE: ${autoConsolidate ? YELLOW + '0 (auto-consolidation disabled)' : GREY + 'not set (enabled at idle)'}${RESET}`);
 
   console.log();
 }
