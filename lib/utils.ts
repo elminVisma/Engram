@@ -80,6 +80,16 @@ export function getScopeGroup(cwd?: string, configPath?: string): string | null 
   return findScopeGroup(scope, loadEngramConfig(configPath));
 }
 
+/**
+ * True if a maintenance pass is due: never run before (null), or at least
+ * `intervalMs` has elapsed since the last run. lastRunMs and nowMs are both in
+ * epoch milliseconds.
+ */
+export function isMaintenanceDue(lastRunMs: number | null, nowMs: number, intervalMs: number): boolean {
+  if (lastRunMs === null) return true;
+  return nowMs - lastRunMs >= intervalMs;
+}
+
 // ─── Capacity caps (flag growing tiers for consolidation) ────────────────────
 
 /** Fraction of a tier's cap at which it is flagged for consolidation. */

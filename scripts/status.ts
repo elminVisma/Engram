@@ -11,8 +11,9 @@ import { statSync, existsSync } from 'fs';
 import http from 'node:http';
 import {
   DB_PATH, tierCounts, ALL_TIERS,
-  checkCapacity, resolveTierCaps, loadEngramConfig,
+  checkCapacity, resolveTierCaps, loadEngramConfig, getMeta,
 } from '../lib/memory.ts';
+import { MAINTENANCE_INTERVAL_HOURS } from '../lib/maintenance.ts';
 import { listSnapshots } from '../lib/snapshot.ts';
 import { listArchived } from '../lib/consolidate.ts';
 
@@ -118,6 +119,12 @@ async function main() {
       } else {
         console.log(`  Snapshots:   ${GREY}none${RESET}`);
       }
+
+      const lastMaint = getMeta('last_maintenance_at', DB_PATH);
+      const lastMaintStr = lastMaint
+        ? new Date(Number(lastMaint)).toLocaleString()
+        : `${GREY}never${RESET}`;
+      console.log(`  Maintenance: ${DIM}every ${MAINTENANCE_INTERVAL_HOURS}h · last run ${lastMaintStr}${RESET}`);
     } catch (e) {
       console.log(`  ${RED}Error reading DB: ${e}${RESET}`);
     }
@@ -145,6 +152,8 @@ async function main() {
   console.log(`  ENGRAM_PORT:          ${engramPort ? CYAN + engramPort : GREY + `not set (using ${PORT})`}${RESET}`);
   const autoConsolidate = process.env.ENGRAM_AUTO_CONSOLIDATE === '0';
   console.log(`  ENGRAM_AUTO_CONSOLIDATE: ${autoConsolidate ? YELLOW + '0 (auto-consolidation disabled)' : GREY + 'not set (enabled at idle)'}${RESET}`);
+  const maintHours = process.env.ENGRAM_MAINTENANCE_HOURS;
+  console.log(`  ENGRAM_MAINTENANCE_HOURS: ${maintHours ? CYAN + maintHours : GREY + 'not set (using 8)'}${RESET}`);
 
   console.log();
 }

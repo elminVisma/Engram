@@ -13,9 +13,46 @@ import http from 'node:http';
 import { pipeline } from '@huggingface/transformers';
 import {
   search, saveMemory, getProjectScope, pruneProvisional, promoteProvisional, PROMOTE_ACCESS_THRESHOLD,
-  tierCounts, checkCapacity, resolveTierCaps, loadEngramConfig,
+  tierCounts, checkCapacity, resolveTierCaps, loadEngramConfig, getMeta, setMeta,
 } from '../lib/memory.ts';
 import type { SaveOptions } from '../lib/memory.ts';
+import { runMaintenanceIfDue } from '../lib/maintenance.ts';
+import { consolidateTier } from '../lib/consolidate.ts';
+
+const LAST_MAINTENANCE_KEY = 'last_maintenance_at';
+const MAINTENANCE_CHECK_MS =
+  parseInt(process.env.ENGRAM_MAINTENANCE_CHECK_MINUTES ?? '30', 10) * 60 * 1000;
+
+/**
+ * Run the maintenance pass if due (promote → prune → consolidate flagged tiers).
+ * The persisted timestamp gates it to at most once per ENGRAM_MAINTENANCE_HOURS,
+ * so calling this often (startup + check timer) is cheap and safe.
+ */
+async function runMaintenance(): Promise<void> {
+  const autoConsolidate = process.env.ENGRAM_AUTO_CONSOLIDATE !== '0';
+  try {
+    await runMaintenanceIfDue({
+      getLastRun: () => { const v = getMeta(LAST_MAINTENANCE_KEY); return v ? Number(v) : null; },
+      setLastRun: (ms) => setMeta(LAST_MAINTENANCE_KEY, String(ms)),
+      promote: () => promoteProvisional(undefined, PROMOTE_ACCESS_THRESHOLD),
+      prune: async () => {
+        const r = await pruneProvisional({ apply: true });
+        return { softDeleted: r.softDeleted, hardDeleted: r.hardDeleted };
+      },
+      capacityFlags: () =>
+        checkCapacity(tierCounts().active, resolveTierCaps(loadEngramConfig())).filter(t => t.atThreshold),
+      consolidate: autoConsolidate
+        ? async (tier) => {
+            const r = await consolidateTier({ tier, apply: true });
+            return { merged: r.merged, archived: r.archived, snapshotId: r.snapshotId };
+          }
+        : undefined,
+      log: (msg) => process.stderr.write(`[Engram daemon] ${msg}\n`),
+    });
+  } catch (e) {
+    process.stderr.write(`[Engram daemon] Maintenance error: ${e}\n`);
+  }
+}
 
 const PORT = parseInt(process.env.ENGRAM_PORT ?? '7700', 10);
 const IDLE_MINUTES = parseInt(process.env.ENGRAM_IDLE_MINUTES ?? '120', 10);
@@ -97,45 +134,13 @@ async function main(): Promise<void> {
 
   resetIdleTimer(server);
 
-  // Daily prune + promote cycle (runs at idle, does not keep the process alive)
-  const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
-  setInterval(async () => {
-    try {
-      const promoted = promoteProvisional(undefined, PROMOTE_ACCESS_THRESHOLD);
-      const pruned = await pruneProvisional({ apply: true });
-      if (promoted > 0 || pruned.softDeleted > 0 || pruned.hardDeleted > 0) {
-        process.stderr.write(
-          `[Engram daemon] Daily prune: promoted=${promoted} soft=${pruned.softDeleted} hard=${pruned.hardDeleted}\n`
-        );
-      }
-
-      // Capacity-triggered consolidation: flag growing tiers that crossed the
-      // threshold, then merge them into denser survivors. Each pass snapshots
-      // first (reversible). Set ENGRAM_AUTO_CONSOLIDATE=0 to flag-only.
-      const caps = resolveTierCaps(loadEngramConfig());
-      const flagged = checkCapacity(tierCounts().active, caps).filter(t => t.atThreshold);
-      if (flagged.length > 0) {
-        process.stderr.write(
-          `[Engram daemon] Tiers over capacity threshold: ${
-            flagged.map(t => `${t.tier}=${t.count}/${t.cap}`).join(' ')
-          }\n`
-        );
-        if (process.env.ENGRAM_AUTO_CONSOLIDATE !== '0') {
-          const { consolidateTier } = await import('../lib/consolidate.ts');
-          for (const t of flagged) {
-            const r = await consolidateTier({ tier: t.tier, apply: true });
-            if (r.merged > 0) {
-              process.stderr.write(
-                `[Engram daemon] Consolidated ${t.tier}: merged=${r.merged} archived=${r.archived} snapshot=${r.snapshotId}\n`
-              );
-            }
-          }
-        }
-      }
-    } catch (e) {
-      process.stderr.write(`[Engram daemon] Prune error: ${e}\n`);
-    }
-  }, PRUNE_INTERVAL_MS).unref();
+  // Maintenance (promote → prune → consolidate) runs "if due" — gated by a
+  // persisted timestamp (ENGRAM_MAINTENANCE_HOURS, default 8h). Run once at
+  // startup to catch up after a restart, then re-check on a short timer that
+  // fits inside the idle window. The timer is unref'd so it never keeps the
+  // process alive on its own.
+  void runMaintenance();
+  setInterval(() => { void runMaintenance(); }, MAINTENANCE_CHECK_MS).unref();
 
   process.on('SIGTERM', () => server.close(() => process.exit(0)));
   process.on('SIGINT',  () => server.close(() => process.exit(0)));

@@ -501,6 +501,33 @@ export function tierCounts(dbPath: string = DB_PATH): TierCounts {
   return counts;
 }
 
+// ─── meta key/value store ─────────────────────────────────────────────────────
+
+/** Read a meta value, or null if the key is absent. */
+export function getMeta(key: string, dbPath: string = DB_PATH): string | null {
+  if (!existsSync(dbPath)) return null;
+  const db = openDb(dbPath);
+  try {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
+    return row ? row.value : null;
+  } finally {
+    db.close();
+  }
+}
+
+/** Upsert a meta value. */
+export function setMeta(key: string, value: string, dbPath: string = DB_PATH): void {
+  const db = openDb(dbPath);
+  try {
+    db.prepare(
+      `INSERT INTO meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run(key, value);
+  } finally {
+    db.close();
+  }
+}
+
 // ─── autoRemember pipeline ───────────────────────────────────────────────────
 // The pure pieces — buildClassifyPrompt / parseClassifyOutput / runClassifier
 // — live in lib/utils.ts so they can be tested without loading transformers.

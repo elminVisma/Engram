@@ -6,7 +6,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const CURRENT_VERSION = 7;
+export const CURRENT_VERSION = 8;
 
 // Each migration: [fromVersion, toVersion, sql]
 export const MIGRATIONS: [number, number, string][] = [
@@ -62,6 +62,15 @@ export const MIGRATIONS: [number, number, string][] = [
   [6, 7, `
     ALTER TABLE memories ADD COLUMN archived_at      INTEGER;
     ALTER TABLE memories ADD COLUMN consolidated_into INTEGER;
+  `],
+  // Key/value metadata — used to persist the last-maintenance timestamp so the
+  // daemon can run "if due" across restarts (its idle timeout is shorter than
+  // the maintenance interval).
+  [7, 8, `
+    CREATE TABLE IF NOT EXISTS meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    );
   `],
 ];
 
