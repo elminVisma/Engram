@@ -3,6 +3,8 @@ dist/
 memory/memory.db
 memory/raw/*
 !memory/raw/.gitkeep
+memory/snapshots/
+memory/recall-pending/
 .DS_Store
 .claude/
 engram.config.json

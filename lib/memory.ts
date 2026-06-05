@@ -20,8 +20,9 @@ import {
   isPruneable, isHardDeletable, PRUNE_AGE_DAYS, HARD_DELETE_AGE_DAYS,
   extractConceptsHeuristic, buildConceptsPrompt, parseConceptsOutput,
   buildRerankPrompt, parseRerankOutput, MAX_CONCEPTS,
+  checkCapacity, resolveTierCaps, CAPACITY_THRESHOLD, DEFAULT_TIER_CAPS,
   type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
-  type PrunableMemory, type HardDeletableMemory,
+  type PrunableMemory, type HardDeletableMemory, type TierCapacity,
 } from './utils.ts';
 
 export {
@@ -35,8 +36,9 @@ export {
   isPruneable, isHardDeletable, PRUNE_AGE_DAYS, HARD_DELETE_AGE_DAYS,
   extractConceptsHeuristic, buildConceptsPrompt, parseConceptsOutput,
   buildRerankPrompt, parseRerankOutput, MAX_CONCEPTS,
+  checkCapacity, resolveTierCaps, CAPACITY_THRESHOLD, DEFAULT_TIER_CAPS,
   type MemoryTier, type SaveDecision, type HeuristicExtract, type ClassifyDecision,
-  type PrunableMemory, type HardDeletableMemory,
+  type PrunableMemory, type HardDeletableMemory, type TierCapacity,
 };
 
 const ENGRAM_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');

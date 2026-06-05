@@ -5,6 +5,8 @@
 
 import type { SaveOptions, MemoryTier, SearchResult, MultiSearchResult } from '../lib/memory.ts';
 import type { PinnedMemory } from '../lib/pin.ts';
+import type { SnapshotInfo } from '../lib/snapshot.ts';
+import type { ConsolidateResult, ArchivedMemory } from '../lib/consolidate.ts';
 
 export interface SaveMemoryInput {
   title: string;
@@ -152,6 +154,94 @@ export async function handleExplainRecall(
         would_inject: r.distance < deps.injectionThreshold,
       })),
     };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+// ─── consolidate / list_archived / unarchive ─────────────────────────────────
+
+export interface ConsolidateInput { tier: MemoryTier; scope?: string; apply?: boolean; }
+export interface ConsolidateHandlerResult { ok: boolean; result?: ConsolidateResult; error?: string; }
+export interface ConsolidateDeps {
+  consolidate: (tier: MemoryTier, scope: string | undefined, apply: boolean) => Promise<ConsolidateResult>;
+}
+
+const CONSOLIDATABLE_TIERS: MemoryTier[] = ['short', 'long', 'user', 'shared', 'provisional'];
+
+export async function handleConsolidate(
+  input: ConsolidateInput,
+  deps: ConsolidateDeps,
+): Promise<ConsolidateHandlerResult> {
+  if (!CONSOLIDATABLE_TIERS.includes(input.tier)) {
+    return { ok: false, error: `tier must be one of: ${CONSOLIDATABLE_TIERS.join(', ')}` };
+  }
+  try {
+    const result = await deps.consolidate(input.tier, input.scope, input.apply ?? false);
+    return { ok: true, result };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export interface ListArchivedResult { ok: boolean; archived?: ArchivedMemory[]; error?: string; }
+export interface ListArchivedDeps { listArchived: () => ArchivedMemory[]; }
+
+export async function handleListArchived(deps: ListArchivedDeps): Promise<ListArchivedResult> {
+  try {
+    return { ok: true, archived: deps.listArchived() };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export interface UnarchiveInput { id: number; }
+export interface UnarchiveResult { ok: boolean; error?: string; }
+export interface UnarchiveDeps { unarchive: (id: number) => void; }
+
+export async function handleUnarchive(input: UnarchiveInput, deps: UnarchiveDeps): Promise<UnarchiveResult> {
+  const id = Number(input.id);
+  if (!Number.isInteger(id) || id <= 0) return { ok: false, error: 'id must be a positive integer' };
+  try {
+    deps.unarchive(id);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+// ─── list_snapshots / restore_snapshot ───────────────────────────────────────
+
+export interface ListSnapshotsResult { ok: boolean; snapshots?: SnapshotInfo[]; error?: string; }
+export interface ListSnapshotsDeps { listSnapshots: () => SnapshotInfo[]; }
+
+export async function handleListSnapshots(deps: ListSnapshotsDeps): Promise<ListSnapshotsResult> {
+  try {
+    return { ok: true, snapshots: deps.listSnapshots() };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export interface RestoreSnapshotInput { id: string; }
+export interface RestoreSnapshotResult { ok: boolean; safetySnapshot?: string; error?: string; }
+export interface RestoreSnapshotDeps {
+  restore: (id: string) => void;
+  /** Snapshot the current state first so the restore is itself reversible. */
+  snapshot: () => SnapshotInfo;
+}
+
+export async function handleRestoreSnapshot(
+  input: RestoreSnapshotInput,
+  deps: RestoreSnapshotDeps,
+): Promise<RestoreSnapshotResult> {
+  const id = (input.id ?? '').trim();
+  if (!id) return { ok: false, error: 'id is required' };
+
+  try {
+    const safety = deps.snapshot();
+    deps.restore(id);
+    return { ok: true, safetySnapshot: safety.id };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
